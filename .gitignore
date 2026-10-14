@@ -1,0 +1,28 @@
+# Maven build output
+target/
+
+# IntelliJ / JetBrains IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Eclipse
+.classpath
+.project
+.settings/
+.factorypath
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Local env / secrets
+.env
+*.local

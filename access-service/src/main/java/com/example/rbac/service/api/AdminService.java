@@ -1,0 +1,227 @@
+package com.example.rbac.service.api;
+
+import com.example.rbac.service.audit.AuditService;
+import com.example.rbac.service.domain.Permission;
+import com.example.rbac.service.domain.PermissionRepository;
+import com.example.rbac.service.domain.Profile;
+import com.example.rbac.service.domain.ProfileRepository;
+import com.example.rbac.service.domain.ProfileScope;
+import com.example.rbac.service.domain.ProfileScopeRepository;
+import com.example.rbac.service.domain.ResourceType;
+import com.example.rbac.service.domain.ResourceTypeRepository;
+import com.example.rbac.service.domain.Template;
+import com.example.rbac.service.domain.TemplateElement;
+import com.example.rbac.service.domain.TemplateRepository;
+import com.example.rbac.service.invalidation.GrantChangeEvent;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Grant authoring (ADR A5, D6, D8, D10). Every mutation: persists, writes a
+ * change-audit row, and publishes a {@link GrantChangeEvent} that — AFTER the
+ * transaction commits — bumps the global version and pushes an invalidation
+ * event so every client replica drops stale L1 near-instantly.
+ */
+@Service
+public class AdminService {
+
+    private final ProfileRepository profiles;
+    private final PermissionRepository permissions;
+    private final ResourceTypeRepository resourceTypes;
+    private final ProfileScopeRepository scopes;
+    private final TemplateRepository templates;
+    private final ApplicationEventPublisher events;
+    private final AuditService audit;
+    private final ObjectMapper json;
+
+    public AdminService(ProfileRepository profiles, PermissionRepository permissions,
+                        ResourceTypeRepository resourceTypes, ProfileScopeRepository scopes,
+                        TemplateRepository templates, ApplicationEventPublisher events,
+                        AuditService audit, ObjectMapper json) {
+        this.profiles = profiles;
+        this.permissions = permissions;
+        this.resourceTypes = resourceTypes;
+        this.scopes = scopes;
+        this.templates = templates;
+        this.events = events;
+        this.audit = audit;
+        this.json = json;
+    }
+
+    @Transactional
+    public Profile createProfile(String actor, String name, String description) {
+        if (profiles.existsByName(name)) {
+            throw new IllegalStateException("Profile already exists: " + name);
+        }
+        Profile p = profiles.save(new Profile(name, description));
+        audit.change(actor, "profile", name, "create", "{}");
+        events.publishEvent(GrantChangeEvent.INSTANCE);
+        return p;
+    }
+
+    @Transactional
+    public void grantPermission(String actor, String profileName, String permissionKey) {
+        Profile p = requireProfile(profileName);
+        Permission perm = requirePermission(permissionKey);
+        if (!p.getPermissions().contains(perm)) {
+            p.getPermissions().add(perm);
+            p.touch();
+            profiles.save(p);
+        }
+        audit.change(actor, "profile", profileName, "grant_permission", "{\"key\":\"" + permissionKey + "\"}");
+        events.publishEvent(GrantChangeEvent.INSTANCE);
+    }
+
+    @Transactional
+    public void revokePermission(String actor, String profileName, String permissionKey) {
+        Profile p = requireProfile(profileName);
+        Permission perm = requirePermission(permissionKey);
+        boolean removed = p.getPermissions().remove(perm);
+        if (removed) {
+            p.touch();
+            profiles.save(p);
+        }
+        audit.change(actor, "profile", profileName, "revoke_permission", "{\"key\":\"" + permissionKey + "\"}");
+        events.publishEvent(GrantChangeEvent.INSTANCE);
+    }
+
+    @Transactional
+    public void setScope(String actor, String profileName, String resourceTypeName, Map<String, Object> dimensions) {
+        Profile p = requireProfile(profileName);
+        ResourceType rt = requireResourceType(resourceTypeName);
+        requireDimensionsMatchSchema(rt, dimensions);
+        String dimsJson = toJson(dimensions);
+        // Upsert: mutate the existing (managed) row in place → one UPDATE. Never
+        // delete+insert: Hibernate flushes INSERTs before DELETEs, so a fresh
+        // insert would violate unique (profile_id, resource_type_id).
+        ProfileScope toSave = scopes.findByProfileIdAndResourceType_Id(p.getId(), rt.getId())
+                .orElseGet(() -> new ProfileScope(p.getId(), rt, dimsJson));
+        toSave.setDimensions(dimsJson);
+        scopes.save(toSave);
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("resourceType", resourceTypeName);
+        detail.put("dimensions", dimensions);
+        audit.change(actor, "profile", profileName, "set_scope", toJson(detail));
+        events.publishEvent(GrantChangeEvent.INSTANCE);
+    }
+
+    @Transactional
+    public Template createTemplate(String actor, String appId, String name,
+                                   Set<String> elementPermissions) {
+        if (templates.existsByAppIdAndName(appId, name)) {
+            throw new IllegalStateException("Template already exists: " + appId + "/" + name);
+        }
+        Template t = new Template(appId, name);
+        for (String permKey : elementPermissions) {
+            Permission perm = requirePermission(permKey);
+            t.getElements().add(new TemplateElement(t, elementKeyFromPermission(permKey), perm));
+        }
+        Template saved = templates.save(t);   // cascade = PERSIST writes the elements
+        audit.change(actor, "template", appId + "/" + name, "create",
+                "{\"elements\":" + toJson(elementPermissions) + "}");
+        events.publishEvent(GrantChangeEvent.INSTANCE);
+        return saved;
+    }
+
+    @Transactional
+    public void attachTemplate(String actor, String profileName, String appId, String templateName) {
+        Profile p = requireProfile(profileName);
+        Template t = templates.findByAppIdAndName(appId, templateName)
+                .orElseThrow(() -> new IllegalStateException("Template not found: " + appId + "/" + templateName));
+        p.getTemplates().add(t);
+        p.touch();
+        profiles.save(p);
+        audit.change(actor, "profile", profileName, "attach_template",
+                "{\"app\":\"" + appId + "\",\"template\":\"" + templateName + "\"}");
+        events.publishEvent(GrantChangeEvent.INSTANCE);
+    }
+
+    @Transactional
+    public ResourceType registerResourceType(String actor, String name, String ownerService,
+                                             Map<String, Object> dimensionSchema) {
+        if (dimensionSchema == null || dimensionSchema.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "dimensionSchema is required: it defines the canonical dimension set for scopes.");
+        }
+        if (resourceTypes.existsByName(name)) {
+            throw new IllegalStateException("Resource type already exists: " + name);
+        }
+        ResourceType rt = resourceTypes.save(new ResourceType(name, ownerService, toJson(dimensionSchema)));
+        audit.change(actor, "resource_type", name, "register",
+                "{\"ownerService\":\"" + ownerService + "\"}");
+        events.publishEvent(GrantChangeEvent.INSTANCE);
+        return rt;
+    }
+
+    // --- helpers ---
+
+    private Profile requireProfile(String name) {
+        return profiles.findByName(name)
+                .orElseThrow(() -> new IllegalStateException("Profile not found: " + name));
+    }
+
+    private Permission requirePermission(String key) {
+        return permissions.findByKey(key)
+                .orElseGet(() -> permissions.save(new Permission(key, null)));
+    }
+
+    private ResourceType requireResourceType(String name) {
+        return resourceTypes.findByName(name)
+                .orElseThrow(() -> new IllegalStateException("Resource type not found: " + name));
+    }
+
+    /**
+     * Enforces the scope-merge contract at authoring time (ADR A3, DESIGN §5.2):
+     * every profile scoping a resource type must declare the SAME dimension set,
+     * otherwise the resolver's union degrades to an AND and can *shrink* access.
+     * The resource type's dimension_schema is the canonical set.
+     */
+    private void requireDimensionsMatchSchema(ResourceType rt, Map<String, Object> dimensions) {
+        Map<String, Object> schema = fromJson(rt.getDimensionSchema());
+        if (schema == null || schema.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Resource type '" + rt.getName() + "' has no dimension schema; "
+                            + "register one before setting scopes.");
+        }
+        if (!schema.keySet().equals(dimensions.keySet())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Dimensions for resource type '" + rt.getName() + "' must be exactly "
+                            + schema.keySet() + " (got " + dimensions.keySet() + ") — profiles scoping "
+                            + "the same resource type must share the dimension set (scope-merge contract).");
+        }
+    }
+
+    private Map<String, Object> fromJson(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return this.json.readValue(json, new TypeReference<Map<String, Object>>() {});
+        } catch (Exception e) {
+            throw new IllegalStateException("Corrupt dimension_schema JSON: " + json, e);
+        }
+    }
+
+    private String toJson(Object o) {
+        try {
+            return json.writeValueAsString(o);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private String elementKeyFromPermission(String permKey) {
+        // "customers-web.tab.invoices" -> "tab.invoices"
+        int idx = permKey.indexOf('.');
+        return (idx >= 0) ? permKey.substring(idx + 1) : permKey;
+    }
+}

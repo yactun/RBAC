@@ -1,0 +1,13 @@
+package com.example.rbac.service.domain;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+import java.util.UUID;
+
+public interface TemplateRepository extends JpaRepository<Template, UUID> {
+
+    Optional<Template> findByAppIdAndName(String appId, String name);
+
+    boolean existsByAppIdAndName(String appId, String name);
+}
