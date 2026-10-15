@@ -1,6 +1,8 @@
 package com.example.rbac.service.domain;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.util.UUID;
 
@@ -23,6 +25,7 @@ public class ResourceType {
     private String ownerService;
 
     /** JSON: {orgIds:{type:list,item:string}, regions:{...}} */
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "dimension_schema")
     private String dimensionSchema;
 

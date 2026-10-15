@@ -85,7 +85,7 @@ class RbacResolverTest {
         UiElementDef hidden = new UiElementDef("web", "tab.refunds", "refunds:read");
         ProfileGrants support = new ProfileGrants("support", Set.of("invoices:read"), Map.of(), List.of(visible, hidden));
 
-        RbacResolver.Resolved r = resolver.resolve(List.of(support), "web", Set.of());
+        RbacResolver.Resolved r = resolver.resolve(List.of(support), Set.of("web"), Set.of());
 
         UiElements web = r.ui().get("web");
         UiElements.Element inv = web.elements().stream().filter(e -> e.key().equals("tab.invoices")).findFirst().orElseThrow();
@@ -96,8 +96,25 @@ class RbacResolverTest {
 
     @Test
     void emptyProfilesYieldEmptyGrants() {
-        RbacResolver.Resolved r = resolver.resolve(List.of(), "web", Set.of());
+        RbacResolver.Resolved r = resolver.resolve(List.of(), Set.of("web"), Set.of());
         assertTrue(r.permissions().isEmpty());
         assertTrue(r.scopes().isEmpty());
+    }
+
+    @Test
+    void nullAppsResolvesUiForEveryAppReferencedByTheTemplates() {
+        // The cached GrantSet (ADR D9) must carry a UI bundle for EVERY app the
+        // profiles' templates reference, so the client can derive ui(app) locally.
+        UiElementDef web = new UiElementDef("web", "tab.invoices", "invoices:read");
+        UiElementDef mobile = new UiElementDef("mobile", "tab.orders", "orders:refund");
+        ProfileGrants a = new ProfileGrants("a", Set.of("invoices:read"), Map.of(), List.of(web));
+        ProfileGrants b = new ProfileGrants("b", Set.of(), Map.of(), List.of(mobile)); // gating perm not granted -> hidden
+
+        RbacResolver.Resolved r = resolver.resolve(List.of(a, b), null, Set.of());
+
+        assertTrue(r.ui().containsKey("web"));
+        assertTrue(r.ui().containsKey("mobile"));
+        assertTrue(r.ui().get("web").elements().get(0).visible());
+        assertFalse(r.ui().get("mobile").elements().get(0).visible());
     }
 }

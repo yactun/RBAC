@@ -29,7 +29,15 @@ import java.util.Set;
  */
 public final class RbacResolver {
 
-    public Resolved resolve(List<ProfileGrants> grants, String app, Set<String> wantedResourceTypes) {
+    /**
+     * @param grants the expanded grants of the user's profiles
+     * @param apps   the apps to include UI bundles for; {@code null} or empty means
+     *               <b>every</b> app referenced by the profiles' templates — the full
+     *               {@code GrantSet} stored in L1/L2 (ADR D9: one cached unit with
+     *               perms + scopes + ui, the client derives check/scope/ui locally)
+     * @param wantedResourceTypes resource types to include scopes for; empty = all
+     */
+    public Resolved resolve(List<ProfileGrants> grants, Set<String> apps, Set<String> wantedResourceTypes) {
         boolean allResources = (wantedResourceTypes == null) || wantedResourceTypes.isEmpty();
 
         Set<String> permissions = new LinkedHashSet<>();
@@ -44,7 +52,11 @@ public final class RbacResolver {
             });
         }
 
-        UiElements ui = (app == null) ? null : computeUi(grants, app, permissions);
+        Set<String> targetApps = (apps == null || apps.isEmpty()) ? allApps(grants) : apps;
+        Map<String, UiElements> ui = new LinkedHashMap<>();
+        for (String app : targetApps) {
+            ui.put(app, computeUi(grants, app, permissions));
+        }
 
         Map<String, Scope> scopeViews = new LinkedHashMap<>();
         scopes.forEach((rt, dims) -> scopeViews.put(rt, new Scope(rt, new LinkedHashMap<>(dims))));
@@ -52,8 +64,18 @@ public final class RbacResolver {
         return new Resolved(
                 List.copyOf(permissions),
                 scopeViews,
-                (ui == null) ? Map.of() : Map.of(app, ui)
+                ui
         );
+    }
+
+    private Set<String> allApps(List<ProfileGrants> grants) {
+        Set<String> apps = new LinkedHashSet<>();
+        for (ProfileGrants g : grants) {
+            for (UiElementDef def : g.uiElements()) {
+                apps.add(def.app());
+            }
+        }
+        return apps;
     }
 
     private UiElements computeUi(List<ProfileGrants> grants, String app, Set<String> permissions) {

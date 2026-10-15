@@ -1,6 +1,8 @@
 package com.example.rbac.service.domain;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.util.UUID;
 
@@ -24,7 +26,8 @@ public class ProfileScope {
     private ResourceType resourceType;
 
     /** JSON: {"orgIds":[1,2,3],"regions":["EU"]} */
-    @Column(nullable = false, columnDefinition = "jsonb")
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(nullable = false)
     private String dimensions;
 
     protected ProfileScope() {

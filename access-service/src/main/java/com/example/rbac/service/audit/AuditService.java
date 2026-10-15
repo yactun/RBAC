@@ -6,7 +6,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
-import java.time.Instant;
 import java.util.Set;
 
 /**
@@ -30,10 +29,13 @@ public class AuditService {
     public void decision(String userId, Set<String> profiles, String op, String target,
                          boolean allowed, long version, String requestId, String callingService) {
         try {
+            // ts is left to the column default (now()): the DB clock is the
+            // source of truth for the partition key, and pgjdbc refuses to bind
+            // java.time.Instant without an explicit SQL type (see AGENTS.md #21).
             jdbc.update(
-                    "insert into audit_decision (user_id, profile_set, op, target, allowed, version, request_id, calling_service, ts) "
-                            + "values (?, ?::text[], ?, ?, ?, ?, ?, ?, ?)",
-                    userId, profiles.toArray(new String[0]), op, target, allowed, version, requestId, callingService, Instant.now());
+                    "insert into audit_decision (user_id, profile_set, op, target, allowed, version, request_id, calling_service) "
+                            + "values (?, ?::text[], ?, ?, ?, ?, ?, ?)",
+                    userId, profiles.toArray(new String[0]), op, target, allowed, version, requestId, callingService);
         } catch (Exception e) {
             // Never let audit failure break the decision path; log loudly.
             log.error("Failed to write decision audit for user={} op={}", userId, op, e);
@@ -41,8 +43,10 @@ public class AuditService {
     }
 
     public void change(String actor, String entity, String entityRef, String action, String detailJson) {
+        // ts is left to the column default (now()) — see decision() for why we
+        // don't bind an Instant parameter.
         jdbc.update(
-                "insert into audit_change (actor, entity, entity_ref, action, detail, ts) values (?, ?, ?, ?, ?::jsonb, ?)",
-                actor, entity, entityRef, action, detailJson, Instant.now());
+                "insert into audit_change (actor, entity, entity_ref, action, detail) values (?, ?, ?, ?, ?::jsonb)",
+                actor, entity, entityRef, action, detailJson);
     }
 }

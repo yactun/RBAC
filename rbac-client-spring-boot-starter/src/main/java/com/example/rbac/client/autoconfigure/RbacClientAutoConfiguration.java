@@ -12,6 +12,8 @@ import com.example.rbac.model.UserContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
+import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -38,7 +40,12 @@ import java.util.Set;
  * a filter after validating the token against the IDM) — or provide your own
  * {@link UserContextResolver} bean to override.
  */
-@AutoConfiguration
+// Order AFTER the infrastructure auto-configurations: the @ConditionalOnBean checks
+// below (StringRedisTemplate, ConnectionFactory) are evaluated when this class's
+// bean definitions are registered, so those bean definitions must already exist.
+// Without this ordering the L2 cache / invalidation subscriber silently vanish
+// depending on classpath order (see InvalidationSubscriberIntegrationTest).
+@AutoConfiguration(after = {RedisAutoConfiguration.class, RabbitAutoConfiguration.class})
 @EnableConfigurationProperties(RbacClientProperties.class)
 @ConditionalOnProperty(prefix = "rbac.client", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class RbacClientAutoConfiguration {

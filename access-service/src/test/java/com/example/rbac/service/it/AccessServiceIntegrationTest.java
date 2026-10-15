@@ -1,0 +1,260 @@
+package com.example.rbac.service.it;
+
+import com.example.rbac.model.Bus;
+import com.example.rbac.model.CacheKeys;
+import com.example.rbac.model.dto.CheckResult;
+import com.example.rbac.model.dto.GrantSet;
+import com.example.rbac.model.dto.InvalidationEvent;
+import com.example.rbac.model.dto.Scope;
+import com.example.rbac.model.dto.UiElements;
+import com.example.rbac.service.cache.GrantCache;
+import com.example.rbac.service.cache.VersionService;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.Test;
+import org.springframework.amqp.core.Binding;
+import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.QueueBuilder;
+import org.springframework.amqp.core.TopicExchange;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+
+import java.net.URI;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
+
+/**
+ * Live-infrastructure integration test (Testcontainers) for the PDP: boots the
+ * full application against real PostgreSQL (Flyway V1+V2), Redis (L2 cache +
+ * policy version) and RabbitMQ (invalidation bus), then exercises over HTTP:
+ *
+ * <ul>
+ *   <li>startup: migrations applied, audit partitioned, Redis + bus reachable;</li>
+ *   <li>admin change &rarr; version bump + {@link InvalidationEvent} on the bus
+ *       (AFTER commit) + synchronous change audit;</li>
+ *   <li>decision path: grants/check/scope/ui + L2 write under the shared
+ *       {@link CacheKeys} scheme (ADR D9/D10);</li>
+ *   <li>revocation: bump + invalidation + the stale cached GrantSet is
+ *       recomputed, so the permission is gone.</li>
+ * </ul>
+ *
+ * <p>Skipped (not failed) when Docker is unavailable.
+ */
+@Testcontainers(disabledWithoutDocker = true)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class AccessServiceIntegrationTest {
+
+    @Container
+    @ServiceConnection
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
+            .withDatabaseName("access")
+            .withUsername("access")
+            .withPassword("access");
+
+    @Container
+    @ServiceConnection(name = "redis")
+    static GenericContainer<?> redis = new GenericContainer<>("redis:7-alpine")
+            .withExposedPorts(6379);
+
+    @Container
+    @ServiceConnection
+    static RabbitMQContainer rabbit = new RabbitMQContainer("rabbitmq:3.12-alpine");
+
+    @Autowired TestRestTemplate rest;
+    @Autowired VersionService versions;
+    @Autowired GrantCache grantCache;
+    @Autowired StringRedisTemplate redisTemplate;
+    @Autowired RabbitTemplate rabbitTemplate;
+    @Autowired RabbitAdmin rabbitAdmin;
+    @Autowired JdbcTemplate jdbc;
+    @Autowired ObjectMapper json;
+
+    // --- startup against live infrastructure ---
+
+    @Test
+    void contextBoots_flywayApplied_auditPartitioned_redisAndBusReachable() {
+        Integer applied = jdbc.queryForObject(
+                "select count(*) from flyway_schema_history where success", Integer.class);
+        assertThat(applied).as("Flyway applied V1 + V2 on the real PostgreSQL").isGreaterThanOrEqualTo(2);
+
+        Integer auditTables = jdbc.queryForObject(
+                "select count(*) from pg_class where relname like 'audit_decision%'", Integer.class);
+        assertThat(auditTables).as("audit parent + default + first month partition").isGreaterThanOrEqualTo(3);
+
+        assertThat(versions.current()).as("policy version readable on a fresh Redis").isGreaterThanOrEqualTo(0L);
+
+        // passive declare throws if the exchange is missing
+        org.assertj.core.api.Assertions.assertThatCode(
+                () -> rabbitTemplate.execute(ch -> ch.exchangeDeclarePassive(Bus.EXCHANGE)))
+                .as("invalidation exchange declared on the bus").doesNotThrowAnyException();
+    }
+
+    // --- admin change -> version bump -> invalidation on the bus -> change audit ---
+
+    @Test
+    void adminChange_bumpsVersion_publishesInvalidation_andWritesChangeAudit() throws Exception {
+        long before = versions.current();
+        String profile = "it-profile-" + System.nanoTime();
+        Queue queue = standinClientQueue();
+
+        ResponseEntity<Map> created = rest.postForEntity("/v1/admin/profiles",
+                new HttpEntity<>(Map.of("name", profile, "description", "integration test"), actor()), Map.class);
+        assertThat(created.getStatusCode().value()).isEqualTo(201);
+
+        assertThat(versions.current()).as("version bumped exactly once, after commit").isEqualTo(before + 1);
+
+        Message message = rabbitTemplate.receive(queue.getName(), 5_000);
+        assertThat(message).as("invalidation event reached the stand-in client queue").isNotNull();
+        InvalidationEvent event = json.readValue(message.getBody(), InvalidationEvent.class);
+        assertThat(event.version()).isEqualTo(before + 1);
+        assertThat(event.userId()).as("global invalidation carries no userId").isNull();
+
+        Integer changeAudits = jdbc.queryForObject(
+                "select count(*) from audit_change where entity_ref = ? and action = 'create'",
+                Integer.class, profile);
+        assertThat(changeAudits).as("synchronous change audit row").isEqualTo(1);
+    }
+
+    // --- full decision flow + revocation round-trip ---
+
+    @Test
+    void decisionFlow_grantsCheckScopeUi_l2Write_andRevocation() throws Exception {
+        String profile = "it-ops-" + System.nanoTime();
+        Set<String> profiles = Set.of(profile);
+
+        // --- authoring via the admin API (each call bumps the version + invalidates) ---
+        assertThat(post("/v1/admin/profiles",
+                Map.of("name", profile, "description", "integration test"))).isEqualTo(201);
+        assertThat(post("/v1/admin/profiles/" + profile + "/permissions", Map.of("key", "orders:create")))
+                .isEqualTo(200);
+        assertThat(post("/v1/admin/resource-types", Map.of(
+                "name", "orders",
+                "ownerService", "orders-svc",
+                "dimensionSchema", Map.of("orgIds", Map.of("type", "list", "item", "string")))))
+                .isEqualTo(201);
+        assertThat(put("/v1/admin/profiles/" + profile + "/scopes/orders", Map.of("orgIds", List.of(1, 2))))
+                .isEqualTo(200);
+        assertThat(post("/v1/admin/templates", Map.of(
+                "appId", "customers-web",
+                "name", "standard",
+                "elements", List.of("customers-web.tab.invoices", "customers-web.tab.orders"))))
+                .isEqualTo(201);
+        assertThat(post("/v1/admin/profiles/" + profile + "/templates",
+                Map.of("appId", "customers-web", "name", "standard"))).isEqualTo(200);
+
+        // --- decision path: the single cached unit (ADR D9) ---
+        ResponseEntity<GrantSet> grantsResp = rest.postForEntity("/v1/grants",
+                new HttpEntity<>(Map.of("userId", "u-1", "profiles", profiles), new HttpHeaders()), GrantSet.class);
+        assertThat(grantsResp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        GrantSet gs = grantsResp.getBody();
+        assertThat(gs).isNotNull();
+        assertThat(gs.permissions()).containsExactlyInAnyOrder(
+                "orders:create", "customers-web.tab.invoices", "customers-web.tab.orders");
+
+        Scope scope = gs.scopes().get("orders");
+        assertThat(scope).as("data scope for the 'orders' resource type").isNotNull();
+        assertThat(scope.values("orgIds")).containsExactly(1, 2);
+
+        UiElements ui = gs.ui().get("customers-web");
+        assertThat(ui).as("UI bundle for the template's app").isNotNull();
+        assertThat(ui.elements()).extracting(UiElements.Element::key, UiElements.Element::visible)
+                .contains(tuple("tab.invoices", true), tuple("tab.orders", true));
+
+        // check: granted (allowed + grantedBy) and denied (no grant)
+        CheckResult allowed = check("u-1", profiles, "orders:create");
+        assertThat(allowed.allowed()).isTrue();
+        assertThat(allowed.grantedBy()).contains(profile);
+        assertThat(check("u-1", profiles, "orders:refund").allowed()).isFalse();
+
+        // L2: the PDP wrote the GrantSet under the shared key scheme — the same
+        // key the starter's L2Cache reads (regression guard on the shared contract).
+        assertThat(grantCache.get("u-1", profiles)).as("L2 hit via GrantCache").isNotNull();
+        assertThat(redisTemplate.opsForValue().get(CacheKeys.grantsKey("u-1", profiles)))
+                .as("L2 value present at the shared CacheKeys key in Redis").isNotNull();
+
+        // Decision audit is async -> poll for both check rows
+        Awaitility.await().atMost(Duration.ofSeconds(10)).until(() ->
+                jdbc.queryForObject("select count(*) from audit_decision where user_id = 'u-1'", Integer.class) >= 2);
+
+        // --- revocation round-trip ---
+        long before = versions.current();
+        Queue queue = standinClientQueue();
+        assertThat(rest.exchange(
+                URI.create("/v1/admin/profiles/" + profile + "/permissions/orders:create"),
+                HttpMethod.DELETE, new HttpEntity<>(actor()), Map.class)
+                .getStatusCode().value()).isEqualTo(200);
+        assertThat(versions.current()).isEqualTo(before + 1);
+
+        Message message = rabbitTemplate.receive(queue.getName(), 5_000);
+        assertThat(message).as("invalidation event on the bus after revocation").isNotNull();
+        assertThat(json.readValue(message.getBody(), InvalidationEvent.class).version()).isEqualTo(before + 1);
+
+        assertThat(jdbc.queryForObject(
+                "select count(*) from audit_change where entity_ref = ? and action = 'revoke_permission'",
+                Integer.class, profile)).isEqualTo(1);
+
+        // The PDP recomputes (the cached GrantSet is stale by version) -> the
+        // permission is no longer served.
+        assertThat(check("u-1", profiles, "orders:create").allowed())
+                .as("revoked permission is no longer served").isFalse();
+    }
+
+    // --- helpers ---
+
+    private HttpHeaders actor() {
+        HttpHeaders h = new HttpHeaders();
+        h.set("X-Actor", "it-qa");
+        return h;
+    }
+
+    private int post(String url, Object body) {
+        return rest.postForEntity(url, new HttpEntity<>(body, actor()), Map.class).getStatusCode().value();
+    }
+
+    private int put(String url, Object body) {
+        return rest.exchange(url, HttpMethod.PUT, new HttpEntity<>(body, actor()), Map.class).getStatusCode().value();
+    }
+
+    private CheckResult check(String userId, Set<String> profiles, String key) {
+        Map<String, Object> body = Map.of("user", Map.of("userId", userId, "profiles", profiles), "key", key);
+        return rest.postForEntity("/v1/check", new HttpEntity<>(body, new HttpHeaders()), CheckResult.class).getBody();
+    }
+
+    /**
+     * A stand-in client queue bound to the shared invalidation exchange (the same
+     * broadcast pattern a real client uses), so the test can observe the events
+     * the PDP publishes.
+     */
+    private Queue standinClientQueue() {
+        String name = "it.standin." + System.nanoTime();
+        Queue queue = QueueBuilder.durable(name).build();
+        rabbitAdmin.declareQueue(queue);
+        rabbitAdmin.declareBinding(BindingBuilder.bind(queue)
+                .to(new TopicExchange(Bus.EXCHANGE, true, false))
+                .with(Bus.ROUTING_KEY));
+        return queue;
+    }
+}
