@@ -4,22 +4,20 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
-import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 /**
  * Redis is used for (a) the L2 shared grant cache and (b) the policy version.
- * Keys and the version are strings; the grant value is JSON. We use
- * StringRedisTemplate for predictable, human-readable keys.
+ * Both are plain strings: the L2 value is JSON TEXT owned by {@code GrantCache}
+ * (it serializes with its own ObjectMapper), and the version is a raw number
+ * written by INCR. A pure-String template keeps the L2 wire format byte-identical
+ * to what the starter's L2Cache reads (Spring Boot's default StringRedisTemplate),
+ * so the PDP (writer) and the clients (readers) agree on the value format.
  */
 @Configuration
 public class RedisConfig {
 
     @Bean
     public StringRedisTemplate stringRedisTemplate(RedisConnectionFactory factory) {
-        StringRedisTemplate t = new StringRedisTemplate(factory);
-        t.setKeySerializer(new StringRedisSerializer());
-        t.setValueSerializer(new GenericJackson2JsonRedisSerializer());
-        return t;
+        return new StringRedisTemplate(factory);
     }
 }

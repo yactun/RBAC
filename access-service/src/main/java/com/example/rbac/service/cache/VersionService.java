@@ -19,8 +19,10 @@ public class VersionService {
     }
 
     public long current() {
-        String v = redis.opsForValue().get(CacheKeys.POLICY_VERSION);
-        return (v == null) ? 0L : Long.parseLong(v);
+        // Serializer-agnostic on purpose: this key is written by raw Redis (INCR), so
+        // a template with a JSON value serializer hands back an Integer, not a String.
+        Object v = redis.opsForValue().get(CacheKeys.POLICY_VERSION);
+        return (v == null) ? 0L : Long.parseLong(v.toString().trim());
     }
 
     /** Bump and return the new version. */
