@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-Maven multi-module build (Java 21, Spring Boot 3.2.5). Run from the repo root.
+Maven multi-module build (Java 21, Spring Boot 3.5.16). Run from the repo root.
 
 ```bash
 mvn clean verify                                   # build all modules + run tests
@@ -22,9 +22,10 @@ mvn -pl access-service -am spring-boot:run         # run the PDP
 ```
 
 - The PDP only boots against live PostgreSQL, Redis and RabbitMQ (Hibernate `ddl-auto: validate` against the Flyway schema, plus a broker connection). There's no embedded or fake setup yet. Connection settings are env vars with localhost defaults in `access-service/src/main/resources/application.yml` (`DB_URL`, `DB_USER`, `DB_PASSWORD`, `REDIS_HOST`, `REDIS_PORT`, `RABBIT_HOST`, …).
-- The tests are `RbacResolverTest` and `AdminServiceTest` (pure unit tests; no infrastructure needed; no Mockito class-mocking, so they run on any JVM). There are no integration or contract tests yet.
+- The unit tests are `RbacResolverTest` (7) and `AdminServiceTest` (5) (no infrastructure needed; they run on any JVM).
+- Integration tests (Testcontainers, need Docker — they skip without it): `AccessServiceIntegrationTest` (access-service) and `InvalidationSubscriberIntegrationTest` (starter). **Green as of 2026-10-15** — see AGENTS.md §0.
 - There is no linter or formatter configured. The `-Xlint:unchecked` warning on `RbacResolver` is expected.
-- This directory is not a git repository.
+- This is a local-only git repository (no remote). Commit after each green milestone.
 
 ## Architecture in brief
 

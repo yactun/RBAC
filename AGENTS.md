@@ -6,6 +6,47 @@
 
 ---
 
+## 0. STATUS — where things stand (2026-10-15, **GREEN + committed**)
+
+**Task done:** Testcontainers integration tests (former §11 items 2–3) — written,
+green, and committed. `mvn clean verify` → **18 tests, 0 failures, BUILD SUCCESS**:
+
+- `access-service` (15): `RbacResolverTest` 7 · `AdminServiceTest` 5 ·
+  `AccessServiceIntegrationTest` 3 — boots the full PDP against **real
+  PostgreSQL 16 / Redis 7 / RabbitMQ 3.12**: migrations + audit partitions ·
+  admin → version-bump → bus invalidation → change-audit · full decision flow
+  (grants/check/scope/ui) + L2 write under the shared `CacheKeys` scheme +
+  revocation round-trip.
+- `rbac-client-spring-boot-starter` (3): `InvalidationSubscriberIntegrationTest`
+  (autoconfig beans · bus → L1 eviction · L2 shared-`CacheKeys` contract) —
+  **completed its first run this session** and is green.
+
+**Last root cause (gotcha #22) fixed in two places:**
+1. `VersionService.current()` now reads the version **serializer-agnostic**
+   (`Object` + `toString()`) — robust to whatever template a host context provides.
+2. `RedisConfig` is now a **pure-String** `StringRedisTemplate` (the Jackson value
+   serializer is gone). `GrantCache` already owned its Jackson serialization
+   (`writeValueAsString`/`readValue`), so it becomes the L2 **wire format** —
+   byte-identical to what the starter's `L2Cache` reads with Spring Boot's default
+   (pure-String) template. Previously the Jackson value serializer **double-encoded**
+   the value (a quoted JSON string), which would have broken every cross-module L2 read.
+
+**Next session:** §11 item 4 (Prometheus metrics) or item 5 (partition
+roll-forward + 3-month retention runbook).
+
+**Fixed & verified green across the two IT sessions** (each fix made the next layer
+fail, in order):
+1. `V2__audit.sql` partition syntax (gotcha #18) → Flyway applies V1+V2 on real PG 16.
+2. `@JdbcTypeCode(SqlTypes.JSON)` on `ResourceType.dimensionSchema` /
+   `ProfileScope.dimensions` (gotcha #19) → Hibernate validation passes, **context boots**.
+3. `AuditService` drops the `ts` parameter — column `default now()` instead
+   (gotcha #21) → admin API returns 201, `audit_change`/`audit_decision` rows land.
+4. Gotcha #22 (version read + L2 wire format) → **all 18 tests green**.
+
+**Boot 3.5.16** (upgraded from 3.2.5) is deliberate — see gotchas #6 and #17.
+
+---
+
 ## 1. What this is
 
 A **central thin Policy Decision Point (PDP)** plus a **shared Spring Boot client
@@ -37,7 +78,7 @@ user-attribute (ABAC) evaluation. The design keeps an escape hatch (a SpEL
 
 ```
 rbac/
-├── pom.xml                                  # parent (Spring Boot 3.2.5, Java 21)
+├── pom.xml                                  # parent (Spring Boot 3.5.16, Java 21)
 ├── DESIGN.md                                # the "what" — full design, review artifact
 ├── ADR-001-user-access-service.md           # the "why" — assumptions, decisions, review artifact
 ├── AGENTS.md                                # THIS FILE
@@ -86,7 +127,7 @@ rbac/
         └── resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
 ```
 
-**Stack:** Java 21, Spring Boot 3.2.5, PostgreSQL (record + audit), Redis (shared
+**Stack:** Java 21, Spring Boot 3.5.16, PostgreSQL (record + audit), Redis (shared
 L2 + version), RabbitMQ (invalidation bus), Caffeine (L1), Flyway, JUnit 5.
 
 ---
@@ -185,10 +226,14 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
 # PDP:   mvn -pl access-service spring-boot:run   (needs Postgres, Redis, RabbitMQ)
 ```
 
-- **Build status: GREEN.** `mvn clean verify` → BUILD SUCCESS;
-  `Tests run: 11, Failures: 0, Errors: 0` (`RbacResolverTest` 6 + `AdminServiceTest` 5).
-- The PDP won't *boot* without live Postgres/Redis/RabbitMQ (it validates schema,
-  connects to the bus, etc.). That is expected; there is no embedded/fake setup yet.
+- **Build status: GREEN (2026-10-15).** `mvn clean verify` → **18 tests, 0
+  failures**: `access-service` 15 (`RbacResolverTest` 7 + `AdminServiceTest` 5 +
+  `AccessServiceIntegrationTest` 3) and `rbac-client-spring-boot-starter` 3
+  (`InvalidationSubscriberIntegrationTest` — autoconfig beans, bus→L1 eviction,
+  L2 shared-key read).
+- Integration tests boot the PDP against **real Postgres/Redis/RabbitMQ via
+  Testcontainers** (`@Testcontainers(disabledWithoutDocker = true)` — they *skip*,
+  not fail, without Docker; gotcha #17).
 
 ---
 
@@ -210,15 +255,18 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
    so a host app can run **L1-only**. The autoconfig guards each with
    `@ConditionalOnClass`/`@ConditionalOnBean`. If you touch the autoconfig, preserve
    that so a non-web / no-broker client still boots.
-6. **`flyway-database-postgresql` is NOT in the Boot 3.2.5 BOM** → it is pinned to
-   `10.10.0` inline in `access-service/pom.xml`. Keep it in sync with `flyway-core`.
+6. **Flyway is BOM-managed** — Boot 3.5.16 manages `flyway-core` +
+   `flyway-database-postgresql` (11.7.2); no inline version pin needed. (On the old
+   Boot 3.2.5 the postgres module was absent from the BOM and had to be pinned to
+   `10.10.0` inline — that pin was removed with the upgrade.)
 7. **Cascade**: `Template.elements` is `@OneToMany(cascade = PERSIST)` and
    `AdminService.createTemplate` builds the elements *before* the single `save()`.
    Don't "simplify" that ordering or the template elements silently won't persist.
 8. **`@Async` audit writes** require `@EnableAsync` (already on `AccessServiceApplication`).
 9. **Audit failure never breaks the decision path** (`AuditService.decision` swallows
    + logs). Change-audit writes are *synchronous* by design (the mutation is the event).
-10. **Not a git repo** — files on disk only. No commit/push state to preserve.
+10. **Local-only git repo** — no remote configured. Commit locally after each green
+    milestone; HEAD history is the only record of what changed.
 11. **Invalidation fires AFTER commit** — `InvalidationOnCommit` runs the version bump +
     `InvalidationEvent` publish via `@TransactionalEventListener(AFTER_COMMIT)`. A client
     refetching in the publish→commit gap can never read uncommitted grants stamped with the
@@ -243,6 +291,66 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     (mutate the managed entity), never delete+insert: Hibernate flushes INSERTs before
     DELETEs, so a fresh insert would violate `unique (profile_id, resource_type_id)`.
     Pinned by `AdminServiceTest`.
+16. **Starter autoconfig ordering is load-bearing** — `RbacClientAutoConfiguration`
+    uses `@ConditionalOnBean(StringRedisTemplate.class)` /
+    `@ConditionalOnBean(ConnectionFactory.class)`, which are evaluated when ITS bean
+    definitions are registered. It therefore declares
+    `@AutoConfiguration(after = {RedisAutoConfiguration.class, RabbitAutoConfiguration.class})`.
+    Remove that and the L2 cache / invalidation subscriber **silently vanish** depending
+    on classpath order (the client runs L1-only / never gets invalidation). Pinned by
+    `InvalidationSubscriberIntegrationTest` (asserts both beans exist with real infra).
+17. **Testcontainers must speak the local Docker daemon's minimum API** — Docker
+    Engine 29.x rejects API < 1.40 (older clients get a bare 400; Testcontainers then
+    reports "Could not find a valid Docker environment" and *skips* the tests).
+    Testcontainers 1.19.x (docker-java 3.3.x) sends API 1.32 → broken; **1.21.4+
+    (docker-java 3.4.x) works**. Boot 3.5.16's BOM manages 1.21.4 natively — that is a
+    key reason the stack was upgraded from Boot 3.2.5 (whose BOM managed 1.19.7).
+    Integration tests use `@Testcontainers(disabledWithoutDocker = true)` so a
+    no-Docker environment skips (not fails) them.
+18. **PostgreSQL partition syntax** — `CREATE TABLE x (cols...) PARTITION OF parent`
+    (including `... (LIKE parent INCLUDING IDENTITY) PARTITION OF parent`) is a
+    **syntax error at "of"** in vanilla PostgreSQL (verified on 16.15). A partition
+    inherits ALL columns, identity and constraints from the parent automatically; the
+    only valid form is `create table <name> partition of <parent> [for values ... | default];`.
+    `V2__audit.sql` was written with the invalid form and **never ran until the
+    Testcontainers ITs booted a real DB** — it is now fixed in place (safe: V2 had no
+    successful application anywhere, so no checksum concern).
+19. **`jsonb` columns need `@JdbcTypeCode(SqlTypes.JSON)` on a `String` field** —
+    plain `String` fields are validated as `varchar(255)` and Hibernate schema
+    *validation* fails at boot: "wrong column type ... found [jsonb], but expecting
+    [varchar(255)]". Fixed on `ResourceType.dimensionSchema` and
+    `ProfileScope.dimensions` (the latter also dropped its dead `columnDefinition="jsonb"`,
+    which is ignored in validate mode anyway). Only caught because the PDP had never
+    booted against a real DB before the ITs. Audit writes use raw JDBC (`?::jsonb`)
+    and are unaffected.
+20. **Probing containers: `docker exec` without `-i` gives psql an EMPTY stdin** —
+    it executes nothing and exits 0, which produced false "it works" results with
+    heredocs. Always use `psql -c "..."` (single statement) or `docker exec -i`.
+    Related zsh trap: `P="docker exec ..."; $P -c ...` fails ("command not found") —
+    zsh does not word-split unquoted variables.
+21. **PG JDBC cannot bind `java.time.Instant` via `setObject` without an explicit
+    SQL type** — it throws "Can't infer the SQL type to use for an instance of
+    java.time.Instant". A SQL-text cast (`?::timestamptz`) does **NOT** help: the
+    check is client-side, driven by the Java object type, not the SQL. The raw JDBC
+    audit inserts therefore **omit `ts` entirely** and rely on the column
+    `default now()` — which is also the right design (the DB clock is the source of
+    truth for the partition key). If you ever must bind a timestamp: use
+    `java.sql.Timestamp`, never `Instant`. Note the `decision` insert is `@Async`
+    and swallows errors — a bind failure there meant audit rows were **silently
+    dropped** (log-only). Pinned by `AccessServiceIntegrationTest` (asserts both
+    `audit_change` and `audit_decision` rows land).
+22. **`RedisConfig` gives `StringRedisTemplate` a Jackson VALUE serializer** — so
+    `opsForValue().get()` deserializes with Jackson: a value written by raw Redis
+    commands (`INCR` for the policy version) comes back as whatever JSON type the
+    bytes imply (`"1"` → `Integer`), and `String v = get()` → **ClassCastException**.
+    `increment()` bypasses serializers entirely. Any code reading a key that may hold
+    a non-JSON-object value (the version!) must be serializer-agnostic: read as
+    `Object` + `toString()`. This broke `VersionService.current()` (→ 3 IT failures,
+    incl. the PDP's `/v1/grants` 500, which stamps the version). **Fixed 2026-10-15**
+    (see §0): `VersionService` reads serializer-agnostic, and `RedisConfig` is now a
+    pure-String template so `GrantCache`'s own Jackson serialization is the L2 wire
+    format the starter's `L2Cache` expects (the Jackson value serializer would have
+    double-encoded every L2 value and broken cross-module reads).
 
 ---
 
@@ -250,15 +358,21 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
 
 **Done (compiles + tested):**
 - All 3 modules build; PDP domain/core/cache/invalidation/audit/api/config are in place.
-- Flyway migrations `V1` (schema) + `V2` (partitioned audit).
+- Flyway migrations `V1` (schema) + `V2` (partitioned audit) — **V2 verified applying on
+  real PostgreSQL 16** (was invalid syntax, gotcha #18; now fixed and run by the ITs).
 - Full client starter: `AccessClient`, `DefaultAccessClient`, L1/L2, invalidation
   subscriber, `UserContextResolver`, autoconfig + `AutoConfiguration.imports`.
-- `RbacResolverTest` (6 green tests, incl. the cross-dimension scope-merge contract) pinning the resolution semantics.
+- `RbacResolverTest` (7 green tests, incl. the cross-dimension scope-merge contract and
+  the all-apps UI resolution) pinning the resolution semantics.
 - `AdminServiceTest` (5 green tests) pinning `setScope` in-place upsert (never delete+insert) and the 400 dimension-set validation.
+- **Testcontainers integration tests GREEN (2026-10-15)** — `AccessServiceIntegrationTest`
+  (boot/migrations/partitions · admin→bump→invalidation→change-audit · full decision
+  flow + L2 key + revocation) and `InvalidationSubscriberIntegrationTest`
+  (autoconfig beans · bus→L1 eviction · L2 shared-`CacheKeys` contract). All 18
+  tests pass; gotcha #22 fixed (serializer-agnostic version read + pure-String
+  `StringRedisTemplate`, which also fixed the L2 wire format for the starter).
 
 **Intentionally NOT done (team review completed 2026-10-14 — see §10):**
-- No live-infrastructure boot test (needs real Postgres/Redis/Rabbit or Testcontainers).
-- No integration / contract tests between PDP and starter (L2 round-trip, invalidation round-trip).
 - No admin *surface* beyond the JSON API (A5: API/config first — no UI in v1).
 - No SpEL `condition` column (D3 escape hatch) — by design, not built.
 - No metrics/SLO wiring beyond actuator defaults.
@@ -297,16 +411,18 @@ implementation items in §11.
 ## 11. Suggested next moves (in order)
 
 1. ~~Resolve the 7 questions above with the team~~ — **done 2026-10-14** (ADR-001 + DESIGN.md updated, ADR marked Accepted).
-2. Add **Testcontainers** integration tests: PDP boots against real Postgres/Redis,
-   admin → version-bump → invalidation → client L1-eviction round-trip.
-3. Add a **contract test** that the starter's L2 read + the PDP's L2 write use the
-   same `CacheKeys` byte-for-byte (regression guard on gotcha #3).
+2. **DONE (2026-10-15)** — Testcontainers integration tests green:
+   `AccessServiceIntegrationTest` (3) + `InvalidationSubscriberIntegrationTest` (3);
+   build fully green (18 tests), committed.
+3. **DONE (2026-10-15)** — the `CacheKeys` contract test
+   (`l2ReadUsesTheSharedCacheKeyScheme` in the starter IT) is green.
 4. Wire **Prometheus metrics** for cache hit-rate + decision latency (SLO evidence).
 5. Write the **partition roll-forward + retention (3 months)** ops runbook.
 6. Only then: the D3 SpEL escape hatch, if the team wants conditional grants.
 
 ---
 
-*Last updated: 2026-10-14 (team review incorporated; ADR-001 marked Accepted). If you change
+*Last updated: 2026-10-15 (integration tests GREEN, gotcha #22 fixed, all committed —
+see §0; team review incorporated 2026-10-14, ADR-001 marked Accepted). If you change
 a decision (D1–D10), update the ADR decision-log first, then this file — keep the three
 artifacts in agreement.*
