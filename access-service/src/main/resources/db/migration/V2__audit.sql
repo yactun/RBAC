@@ -1,6 +1,8 @@
 -- V2__audit.sql — partitioned audit tables (design §5.3, ADR D8)
 -- Partitioned by month on `ts`. Ops adds next-month partitions ahead of time
 -- (see the default partition below); archive/drop per retention policy.
+-- Runbook + idempotent rotation script (roll-forward + 3-month retention):
+--   RUNBOOK-audit-partitions.md · ops/rotate_audit_partitions.sql
 --
 -- SYNTAX NOTE (learned the hard way): PostgreSQL does NOT accept a column
 -- list (including `LIKE parent`) in `CREATE TABLE ... PARTITION OF parent`.

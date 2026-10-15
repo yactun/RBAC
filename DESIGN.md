@@ -366,7 +366,7 @@ Because clients are stateless and multi-replica, a purely local cache fragments.
 
 - **Decision audit** (`audit_decision`): every `check` — `ts, user_id, request_id, calling_service, op, target, allowed, profile_set`. Written **asynchronously** (an in-process `@Async` writer to a partitioned table). Never on the decision hot path.
 - **Change audit** (`audit_change`): every admin mutation — `actor, entity, entity_ref, action, detail`. Synchronous (the mutation is the event) but written in the same transaction as the grant change.
-- **Retention:** rolling **3 months** (team-confirmed 2026-10-14) for both decision and change audits; monthly partitions with **drop/archive of partitions older than 3 months** (scheduled job + runbook). Every record is queryable — an audit is a query, not archaeology.
+- **Retention:** rolling **3 months** (team-confirmed 2026-10-14) for both decision and change audits; monthly partitions with **drop/archive of partitions older than 3 months** (scheduled job + runbook — delivered 2026-10-15: idempotent `ops/rotate_audit_partitions.sql` + `RUNBOOK-audit-partitions.md`, verified on PostgreSQL 16). Every record is queryable — an audit is a query, not archaeology.
 
 ---
 

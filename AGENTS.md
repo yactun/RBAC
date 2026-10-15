@@ -6,13 +6,13 @@
 
 ---
 
-## 0. STATUS — where things stand (2026-10-15, **GREEN — metrics work UNCOMMITTED**)
+## 0. STATUS — where things stand (2026-10-15, **GREEN — handoff items 1–5 done**)
 
-**Latest task done (NOT yet committed — user asked to stop before commit):**
-observability metrics (former §11 item 4) — **OpenTelemetry/OTLP backend** (team
-choice 2026-10-15: CNCF-adopted framework, obsolescence-proofing; Prometheus may
-stay a backend *behind* the collector). `mvn clean verify` →
-**25 tests, 0 failures, BUILD SUCCESS**:
+**Committed this session:**
+- `8bf6fa8` — observability metrics (former §11 item 4) with an
+  **OpenTelemetry/OTLP backend** (team choice 2026-10-15: CNCF-adopted framework,
+  obsolescence-proofing; Prometheus may stay a backend *behind* the collector),
+  + tests + docs. `mvn clean verify` → **25 tests, 0 failures, BUILD SUCCESS**:
 
 - `access-service` (16): `RbacResolverTest` 7 · `AdminServiceTest` 5 ·
   `AccessServiceIntegrationTest` 4 (incl. the new metrics test) — boots the full
@@ -22,7 +22,7 @@ stay a backend *behind* the collector). `mvn clean verify` →
   no-sink boot) + `InvalidationSubscriberIntegrationTest` 4 (incl. adapter
   auto-wired + event counter).
 
-**What changed (uncommitted — see `git status`):**
+**What changed (metrics commit):**
 - PDP: `micrometer-registry-otlp` dep; `GrantService` records `rbac.pdp.decision`
   (timer, per operation) + `rbac.pdp.cache` (L2 hit/miss); `InvalidationOnCommit`
   records `rbac.pdp.invalidation.published`/`.lost` (the "lost" counter = bus-outage
@@ -35,7 +35,26 @@ stay a backend *behind* the collector). `mvn clean verify` →
   `rbac.client.pdp.fetch` (success/failure), `rbac.client.invalidation.events`.
   `micrometer-core` is **optional** — an L1-only host without an observability
   stack still boots (ADR D5).
-- **Next action: commit** (user deferred it deliberately), then §11 item 5.
+**§11 item 5 done this session (uncommitted — see `git status`):** the
+**partition roll-forward + 3-month retention ops runbook** (D8's "job + runbook"):
+- `ops/rotate_audit_partitions.sql` — **idempotent** psql script: creates
+  next month's `<parent>_<YYYY_MM>` partition for `audit_decision` +
+  `audit_change` if missing, and drops monthly partitions older than the rolling
+  3-month window (never touches `*_default`).
+- `RUNBOOK-audit-partitions.md` — procedure, archive-before-drop option, cron
+  example, monitoring/alert queries (default partition non-empty, missing
+  next-month partition, inventory), failure-mode/recovery table.
+- **Verified against real PostgreSQL 16.15** (ephemeral container): roll-forward
+  + idempotent re-run + retention drop + out-of-range row routed to
+  `audit_decision_default`. Note: the *first* retention "test pass" was a false
+  positive — `docker exec` heredoc without `-i` feeds psql an empty stdin and
+  exits 0 (gotcha #20); re-tested with guaranteed stdin (`docker exec -i`) and
+  verified the stale partitions existed before the drop.
+- `V2__audit.sql` header now points to the runbook + script (safe: V2 had no
+  successful application anywhere — gotcha #18).
+- **Next action: commit** this runbook work, then §11 item 6 (D3 SpEL escape
+  hatch — **gated on the team** wanting conditional grants; do not build
+  unilaterally).
 
 **Previously committed (HEAD `e09deae`):** Testcontainers integration tests
 (green) + gotcha #22 fix, in two commits (`2ffc101`, `d1dca98`) + docs (`e09deae`).
@@ -414,19 +433,28 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
   adapter + event counter). 25 tests pass; gotcha #22 fixed (serializer-agnostic
   version read + pure-String `StringRedisTemplate`, which also fixed the L2 wire
   format for the starter).
-- **Observability metrics GREEN (2026-10-15, UNCOMMITTED)** — OTLP/OpenTelemetry
+- **Observability metrics GREEN (2026-10-15, committed `8bf6fa8`)** — OTLP/OpenTelemetry
   backend (team choice over plain Prometheus registry for CNCF alignment). PDP:
   `rbac.pdp.decision` / `rbac.pdp.cache` / `rbac.pdp.invalidation.{published,lost}`.
   Starter: `rbac.client.{cache,decision,pdp.fetch,invalidation.events}` via the
   no-op-by-default `RbacClientMetrics` sink (Micrometer optional). Pinned by
   `AccessServiceIntegrationTest.metrics_…` + `DefaultAccessClientMetricsTest`
   (5 tests) + the starter IT adapter assertions.
+- **Partition roll-forward + 3-month retention ops (2026-10-15, UNCOMMITTED)** —
+  `ops/rotate_audit_partitions.sql` (idempotent: create next month's partition,
+  drop months older than the rolling 3-month window, never touches `*_default`)
+  + `RUNBOOK-audit-partitions.md` (procedure, archive option, cron, monitoring
+  queries, failure-mode recovery). Both verified on real PostgreSQL 16.15
+  (roll-forward, retention, idempotency, default-partition routing). Fulfills
+  D8's "job + runbook"; `V2__audit.sql` header now points to them.
 
 **Intentionally NOT done (team review completed 2026-10-14 — see §10):**
 - No admin *surface* beyond the JSON API (A5: API/config first — no UI in v1).
 - No SpEL `condition` column (D3 escape hatch) — by design, not built.
-- No metrics/SLO wiring beyond actuator defaults.
-- Partition roll-forward runbook + retention jobs (ops; **3-month retention** confirmed).
+- No SLO dashboards/alerts configured on the platform side (the *meters* exist —
+  see the metrics bullet above; the collector→dashboard wiring is a platform job).
+- No audit archiving by default (team decision: **drop, no archive**, 3-month
+  rolling — the runbook documents the archive option if compliance asks).
 
 ---
 
@@ -466,18 +494,24 @@ implementation items in §11.
    build fully green (18 tests), committed.
 3. **DONE (2026-10-15)** — the `CacheKeys` contract test
    (`l2ReadUsesTheSharedCacheKeyScheme` in the starter IT) is green.
-4. **DONE (2026-10-15, UNCOMMITTED)** — metrics for cache hit-rate + decision
-   latency (SLO evidence), **OpenTelemetry/OTLP backend** (team choice 2026-10-15
-   over a plain Prometheus registry: CNCF-adopted, obsolescence-proofing). PDP +
-   starter instrumented, 9 new tests green (25 total). See §0 for the exact meter
-   names; gotchas #23/#24 capture the Boot-test + Micrometer 1.15 traps.
-5. Write the **partition roll-forward + retention (3 months)** ops runbook.
-6. Only then: the D3 SpEL escape hatch, if the team wants conditional grants.
+4. **DONE (2026-10-15, committed `8bf6fa8`)** — metrics for cache hit-rate +
+   decision latency (SLO evidence), **OpenTelemetry/OTLP backend** (team choice
+   2026-10-15 over a plain Prometheus registry: CNCF-adopted,
+   obsolescence-proofing). PDP + starter instrumented, 9 new tests green (25
+   total). See §0 for the exact meter names; gotchas #23/#24 capture the
+   Boot-test + Micrometer 1.15 traps.
+5. **DONE (2026-10-15, UNCOMMITTED)** — **partition roll-forward + retention
+   (3 months)** ops runbook: `ops/rotate_audit_partitions.sql` (idempotent
+   script) + `RUNBOOK-audit-partitions.md`, verified on real PG 16 (see §0).
+6. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
+   (conditional grants). Gated on a team decision; do not build unilaterally.
 
 ---
 
 *Last updated: 2026-10-15 (integration tests GREEN + committed; **OTel/OTLP metrics
-GREEN but UNCOMMITTED** — next action is the commit, see §0; team review incorporated
-2026-10-14, ADR-001 marked Accepted; metrics backend chosen 2026-10-15). If you change
-a decision (D1–D10), update the ADR decision-log first, then this file — keep the three
-artifacts in agreement.*
+committed `8bf6fa8`**; **partition roll-forward + 3-month retention runbook +
+idempotent script done and PG-16-verified, UNCOMMITTED** — next action is that
+commit, see §0; handoff items 1–5 complete, item 6 gated on the team; team review
+incorporated 2026-10-14, ADR-001 marked Accepted; metrics backend chosen 2026-10-15).
+If you change a decision (D1–D10), update the ADR decision-log first, then this
+file — keep the three artifacts in agreement.*

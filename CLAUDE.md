@@ -25,6 +25,7 @@ mvn -pl access-service -am spring-boot:run         # run the PDP
 - The unit tests are `RbacResolverTest` (7), `AdminServiceTest` (5), and `DefaultAccessClientMetricsTest` (5, starter — client metrics wiring, no infra needed). They run on any JVM.
 - Integration tests (Testcontainers, need Docker — they skip without it): `AccessServiceIntegrationTest` (access-service) and `InvalidationSubscriberIntegrationTest` (starter). **Green as of 2026-10-15** — see AGENTS.md §0.
 - Observability: metrics are recorded via the **Micrometer API** and exported as **OTLP** (OpenTelemetry). PDP uses `micrometer-registry-otlp`; the starter's Micrometer is an **optional** dependency behind a no-op-by-default `RbacClientMetrics` sink. Meter names and the OTLP endpoint knob are in AGENTS.md §0/§9.
+- Ops: audit partition rotation (monthly roll-forward + 3-month retention) is `ops/rotate_audit_partitions.sql` (idempotent, PG-16-verified) — full procedure in `RUNBOOK-audit-partitions.md`.
 - There is no linter or formatter configured. The `-Xlint:unchecked` warning on `RbacResolver` is expected.
 - This is a local-only git repository (no remote). Commit after each green milestone.
 
