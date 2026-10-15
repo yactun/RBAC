@@ -2,6 +2,7 @@ package com.example.rbac.client.autoconfigure;
 
 import com.example.rbac.client.AccessClient;
 import com.example.rbac.client.DefaultAccessClient;
+import com.example.rbac.client.RbacClientMetrics;
 import com.example.rbac.client.RbacClientProperties;
 import com.example.rbac.client.cache.L1Cache;
 import com.example.rbac.client.cache.L2Cache;
@@ -10,6 +11,7 @@ import com.example.rbac.client.invalidation.InvalidationSubscriber;
 import com.example.rbac.client.security.UserContextResolver;
 import com.example.rbac.model.UserContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
@@ -20,6 +22,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.client.RestClient;
@@ -64,16 +67,37 @@ public class RbacClientAutoConfiguration {
         return new L2Cache(redis, json);
     }
 
+    /**
+     * Metrics sink: a Micrometer adapter when the host app has a
+     * {@code MeterRegistry} bean, otherwise a no-op. The client has no hard
+     * dependency on Micrometer — an L1-only host without actuator still boots
+     * (ADR D5). A host app can override by providing its own
+     * {@link RbacClientMetrics} bean.
+     *
+     * <p>{@code @ConditionalOnClass} (not a {@code MeterRegistry} method parameter)
+     * so the micrometer classes are only referenced — and thus only loaded — when
+     * they are actually present.
+     */
+    @Bean
+    @ConditionalOnMissingBean(RbacClientMetrics.class)
+    @ConditionalOnClass(MeterRegistry.class)
+    public RbacClientMetrics rbacClientMetrics(ConfigurableListableBeanFactory beanFactory) {
+        MeterRegistry registry = beanFactory.getBeansOfType(MeterRegistry.class)
+                .values().stream().findFirst().orElse(null);
+        return (registry == null) ? RbacClientMetrics.NONE : new MicrometerRbacClientMetrics(registry);
+    }
+
     @Bean
     @ConditionalOnMissingBean(AccessClient.class)
     public AccessClient rbacAccessClient(L1Cache l1,
                                          ObjectProvider<L2Cache> l2,
                                          RbacClientProperties props,
-                                         ObjectMapper json) {
+                                         ObjectMapper json,
+                                         RbacClientMetrics metrics) {
         // Build our own RestClient so we never depend on (or clash with) a
         // host-app RestClient bean.
         RestClient rest = RestClient.builder().baseUrl(props.getBaseUrl()).build();
-        return new DefaultAccessClient(l1, l2.getIfAvailable(), rest, json);
+        return new DefaultAccessClient(l1, l2.getIfAvailable(), rest, json, metrics);
     }
 
     @Bean
@@ -83,7 +107,8 @@ public class RbacClientAutoConfiguration {
     public InvalidationSubscriber rbacInvalidationSubscriber(ConnectionFactory connectionFactory,
                                                              RbacClientProperties props,
                                                              ObjectMapper json,
-                                                             AccessClient accessClient) {
+                                                             AccessClient accessClient,
+                                                             RbacClientMetrics metrics) {
         // Broadcast pattern: a unique queue per instance so the exchange fans each
         // event out to EVERY replica. A shared queue would competitive-consume and
         // deliver each event to only one replica, defeating D6 ("reach every replica").
@@ -99,6 +124,7 @@ public class RbacClientAutoConfiguration {
                 queue,
                 json,
                 event -> {
+                    metrics.invalidationEvent();
                     if (accessClient instanceof InvalidationHandler handler) {
                         handler.onEvent(event);
                     }

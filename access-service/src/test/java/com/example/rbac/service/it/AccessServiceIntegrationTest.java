@@ -10,6 +10,9 @@ import com.example.rbac.model.dto.UiElements;
 import com.example.rbac.service.cache.GrantCache;
 import com.example.rbac.service.cache.VersionService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Binding;
@@ -44,6 +47,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.tuple;
 
 /**
@@ -91,6 +95,7 @@ class AccessServiceIntegrationTest {
     @Autowired RabbitAdmin rabbitAdmin;
     @Autowired JdbcTemplate jdbc;
     @Autowired ObjectMapper json;
+    @Autowired MeterRegistry registry;
 
     // --- startup against live infrastructure ---
 
@@ -220,6 +225,45 @@ class AccessServiceIntegrationTest {
         // permission is no longer served.
         assertThat(check("u-1", profiles, "orders:create").allowed())
                 .as("revoked permission is no longer served").isFalse();
+    }
+
+    // --- metrics (SLO evidence: decision latency + cache hit-rate, exported via OTel) ---
+
+    @Test
+    void metrics_decisionLatencyAndCacheHitRate_recorded_andOtlpBackendOnClasspath() {
+        String profile = "it-metrics-" + System.nanoTime();
+        assertThat(post("/v1/admin/profiles",
+                Map.of("name", profile, "description", "metrics test"))).isEqualTo(201);
+        assertThat(post("/v1/admin/profiles/" + profile + "/permissions", Map.of("key", "orders:create")))
+                .isEqualTo(200);
+        Set<String> profiles = Set.of(profile);
+
+        // first check: L2 miss (compute + write); second: L2 hit (same version, no bump between)
+        assertThat(check("u-metrics", profiles, "orders:create").allowed()).isTrue();
+        assertThat(check("u-metrics", profiles, "orders:create").allowed()).isTrue();
+
+        Timer checkTimer = registry.get("rbac.pdp.decision").tags("operation", "check").timer();
+        assertThat(checkTimer).as("decision latency timer is recorded").isNotNull();
+        assertThat(checkTimer.count()).isGreaterThanOrEqualTo(2);
+
+        Counter l2Hit = registry.get("rbac.pdp.cache").tags("tier", "l2", "result", "hit").counter();
+        Counter l2Miss = registry.get("rbac.pdp.cache").tags("tier", "l2", "result", "miss").counter();
+        assertThat(l2Miss).as("L2 miss is recorded").isNotNull();
+        assertThat(l2Miss.count()).isGreaterThanOrEqualTo(1);
+        assertThat(l2Hit).as("L2 hit is recorded").isNotNull();
+        assertThat(l2Hit.count()).isGreaterThanOrEqualTo(1);
+
+        Counter published = registry.get("rbac.pdp.invalidation.published").counter();
+        assertThat(published).as("invalidation publish counter is recorded").isNotNull();
+        assertThat(published.count()).isGreaterThanOrEqualTo(1);
+
+        // Backend: OpenTelemetry (CNCF standard) — the OTLP registry is a runtime
+        // dependency. Boot wires it whenever metrics export is enabled; Boot's test
+        // policy disables export in @SpringBootTest (hence a SimpleMeterRegistry
+        // here) so we assert the dependency rather than the test-environment registry.
+        assertThatCode(() -> Class.forName("io.micrometer.registry.otlp.OtlpMeterRegistry"))
+                .as("the OTel (OTLP) registry is on the runtime classpath")
+                .doesNotThrowAnyException();
     }
 
     // --- helpers ---

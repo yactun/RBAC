@@ -15,6 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.client.RestClient;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -30,6 +31,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Also implements {@link InvalidationHandler}: a bus event raises the local
  * policy version and clears L1, so the next read sees the new version and
  * refetches (ADR D6, D10).
+ *
+ * <p>Metrics flow through the {@link RbacClientMetrics} sink (no-op when the host
+ * app has no Micrometer registry — see the auto-configuration).
  */
 public class DefaultAccessClient implements AccessClient, InvalidationHandler {
 
@@ -39,70 +43,127 @@ public class DefaultAccessClient implements AccessClient, InvalidationHandler {
     private final L2Cache l2; // nullable — absent when the host app has no Redis
     private final RestClient rest;
     private final ObjectMapper json;
+    private final RbacClientMetrics metrics;
     private final AtomicLong localVersion = new AtomicLong(0);
 
     public DefaultAccessClient(L1Cache l1, L2Cache l2, RestClient rest, ObjectMapper json) {
+        this(l1, l2, rest, json, RbacClientMetrics.NONE);
+    }
+
+    public DefaultAccessClient(L1Cache l1, L2Cache l2, RestClient rest, ObjectMapper json,
+                               RbacClientMetrics metrics) {
         this.l1 = l1;
         this.l2 = l2;
         this.rest = rest;
         this.json = json;
+        this.metrics = (metrics == null) ? RbacClientMetrics.NONE : metrics;
     }
 
     @Override
     public CheckResult check(UserContext user, String key) {
+        long start = System.nanoTime();
+        String source = "error";
         try {
-            GrantSet g = grants(user);
-            boolean allowed = g.has(key);
-            return new CheckResult(allowed, List.of(), g.version());
+            Resolved r = resolve(user);
+            source = r.source();
+            boolean allowed = r.set().has(key);
+            return new CheckResult(allowed, List.of(), r.set().version());
         } catch (RuntimeException e) {
             log.warn("check failed closed for user={}: {}", user.userId(), e.toString());
             return CheckResult.deny(localVersion.get());
+        } finally {
+            metrics.decision("check", source, Duration.ofNanos(System.nanoTime() - start));
         }
     }
 
     @Override
     public Scope scope(UserContext user, String resourceType) {
-        GrantSet g = grants(user); // fail-closed: a genuine fault throws here → 500
-        Scope s = (g.scopes() == null) ? null : g.scopes().get(resourceType);
-        if (s == null) {
-            // A legitimate deny (no scope for this resource type) → 403, not a 500.
-            // Still refuses an unscoped query (ADR §9.3 fail-closed).
-            throw new AccessDeniedException("No data scope for resourceType=" + resourceType
-                    + " (user denied an unscoped query)");
+        long start = System.nanoTime();
+        String source = "error";
+        try {
+            // fail-closed: a genuine fault throws here → 500
+            Resolved r = resolve(user);
+            source = r.source();
+            Scope s = (r.set().scopes() == null) ? null : r.set().scopes().get(resourceType);
+            if (s == null) {
+                // A legitimate deny (no scope for this resource type) → 403, not a 500.
+                // Still refuses an unscoped query (ADR §9.3 fail-closed).
+                throw new AccessDeniedException("No data scope for resourceType=" + resourceType
+                        + " (user denied an unscoped query)");
+            }
+            return s;
+        } finally {
+            metrics.decision("scope", source, Duration.ofNanos(System.nanoTime() - start));
         }
-        return s;
     }
 
     @Override
     public UiElements ui(UserContext user, String app) {
-        GrantSet g = grants(user); // fail-closed: a genuine fault throws here → 500
-        UiElements ui = (g.ui() == null) ? null : g.ui().get(app);
-        if (ui == null) {
-            // No UI bundle for this app → nothing is visible. A legitimate deny, not
-            // an error: return an empty bundle so the front-end renders nothing.
-            return new UiElements(app, List.of());
+        long start = System.nanoTime();
+        String source = "error";
+        try {
+            // fail-closed: a genuine fault throws here → 500
+            Resolved r = resolve(user);
+            source = r.source();
+            UiElements ui = (r.set().ui() == null) ? null : r.set().ui().get(app);
+            if (ui == null) {
+                // No UI bundle for this app → nothing is visible. A legitimate deny, not
+                // an error: return an empty bundle so the front-end renders nothing.
+                return new UiElements(app, List.of());
+            }
+            return ui;
+        } finally {
+            metrics.decision("ui", source, Duration.ofNanos(System.nanoTime() - start));
         }
-        return ui;
     }
 
     @Override
     public GrantSet grants(UserContext user) {
+        long start = System.nanoTime();
+        String source = "error";
+        try {
+            Resolved r = resolve(user);
+            source = r.source();
+            return r.set();
+        } finally {
+            metrics.decision("grants", source, Duration.ofNanos(System.nanoTime() - start));
+        }
+    }
+
+    /**
+     * L1 → L2 → PDP resolution of the single cached unit (ADR D5/D9). Records the
+     * L1/L2 hit-miss and PDP-fetch counters; the caller records the decision timer
+     * with the {@link Resolved#source()} tag.
+     */
+    private Resolved resolve(UserContext user) {
         long current = localVersion.get();
 
         GrantSet g = l1.get(user.userId(), user.profiles());
         if (g != null && g.version() >= current) {
-            return g;
+            metrics.cache("l1", "hit");
+            return new Resolved(g, "l1");
         }
+        metrics.cache("l1", "miss");
+
         if (l2 != null) {
             g = l2.get(user.userId(), user.profiles());
             if (g != null && g.version() >= current) {
                 l1.put(user.userId(), user.profiles(), g);
-                return g;
+                metrics.cache("l2", "hit");
+                return new Resolved(g, "l2");
             }
+            metrics.cache("l2", "miss");
         }
-        g = fetchFromPdp(user);
+
+        try {
+            g = fetchFromPdp(user);
+        } catch (RuntimeException e) {
+            metrics.pdpFetch(false);
+            throw e;
+        }
+        metrics.pdpFetch(true);
         l1.put(user.userId(), user.profiles(), g);
-        return g;
+        return new Resolved(g, "pdp");
     }
 
     private GrantSet fetchFromPdp(UserContext user) {
@@ -129,4 +190,7 @@ public class DefaultAccessClient implements AccessClient, InvalidationHandler {
         // per-replica). The next read refetches and revalidates the version.
         l1.clear();
     }
+
+    /** The resolved grant set plus the tier that served it (l1|l2|pdp), for the decision metric. */
+    private record Resolved(GrantSet set, String source) { }
 }

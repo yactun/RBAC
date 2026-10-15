@@ -44,6 +44,14 @@ management:
     web:
       exposure:
         include: health,info,metrics
+  # OTLP metrics export (OpenTelemetry, CNCF standard). Point at the platform's
+  # OTel collector; Prometheus/Tempo remain backends *behind* the collector.
+  otlp:
+    metrics:
+      export:
+        endpoint: ${OTLP_METRICS_ENDPOINT:http://localhost:4318/v1/metrics}
+        # header:
+        #   authorization: "Bearer ${OTLP_TOKEN:}"   # only if the collector requires auth
 
 logging:
   level:

@@ -45,6 +45,14 @@
       <artifactId>slf4j-api</artifactId>
     </dependency>
 
+    <!-- Optional metrics: the client works with a no-op sink when absent (L1-only hosts).
+         The Micrometer adapter is only auto-wired when a MeterRegistry bean exists. -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-core</artifactId>
+      <optional>true</optional>
+    </dependency>
+
     <!-- L1 local cache -->
     <dependency>
       <groupId>com.github.ben-manes.caffeine</groupId>
@@ -66,6 +74,13 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Test scope: a MeterRegistry bean (SimpleMeterRegistry) so the auto-configured
+         Micrometer metrics adapter can be exercised in the integration test. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
       <scope>test</scope>
     </dependency>
 

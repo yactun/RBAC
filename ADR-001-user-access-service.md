@@ -269,5 +269,5 @@ These are the properties we will encode as tests once accepted — i.e., the des
 ## 11. Status & next steps
 
 - **Status: Accepted** (2026-10-14). Team feedback incorporated (§8); decisions D2/D6/D7/D8/D10 carry matching notes.
-- **Next:** proceed to the remaining implementation items — Testcontainers integration tests, the PDP↔starter L2 key contract test, Prometheus metrics, and the partition roll-forward + **3-month retention** runbook. See `AGENTS.md` §11 for the ordered list.
+- **Next:** remaining implementation items — ~~Testcontainers integration tests~~ (done 2026-10-15), ~~the PDP↔starter L2 key contract test~~ (done 2026-10-15), ~~metrics (OpenTelemetry/OTLP backend, chosen 2026-10-15 over a plain Prometheus registry for CNCF alignment)~~ (done 2026-10-15), and the **partition roll-forward + 3-month retention runbook** (next). See `AGENTS.md` §11 for the ordered list.
 - **Any change** to a decision after acceptance gets a new ADR (e.g. ADR-002) referencing this one, so the history stays explicit.

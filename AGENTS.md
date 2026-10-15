@@ -6,23 +6,41 @@
 
 ---
 
-## 0. STATUS — where things stand (2026-10-15, **GREEN + committed**)
+## 0. STATUS — where things stand (2026-10-15, **GREEN — metrics work UNCOMMITTED**)
 
-**Task done:** Testcontainers integration tests (former §11 items 2–3) — written,
-green, and committed. `mvn clean verify` → **18 tests, 0 failures, BUILD SUCCESS**:
+**Latest task done (NOT yet committed — user asked to stop before commit):**
+observability metrics (former §11 item 4) — **OpenTelemetry/OTLP backend** (team
+choice 2026-10-15: CNCF-adopted framework, obsolescence-proofing; Prometheus may
+stay a backend *behind* the collector). `mvn clean verify` →
+**25 tests, 0 failures, BUILD SUCCESS**:
 
-- `access-service` (15): `RbacResolverTest` 7 · `AdminServiceTest` 5 ·
-  `AccessServiceIntegrationTest` 3 — boots the full PDP against **real
-  PostgreSQL 16 / Redis 7 / RabbitMQ 3.12**: migrations + audit partitions ·
-  admin → version-bump → bus invalidation → change-audit · full decision flow
-  (grants/check/scope/ui) + L2 write under the shared `CacheKeys` scheme +
-  revocation round-trip.
-- `rbac-client-spring-boot-starter` (3): `InvalidationSubscriberIntegrationTest`
-  (autoconfig beans · bus → L1 eviction · L2 shared-`CacheKeys` contract) —
-  **completed its first run this session** and is green.
+- `access-service` (16): `RbacResolverTest` 7 · `AdminServiceTest` 5 ·
+  `AccessServiceIntegrationTest` 4 (incl. the new metrics test) — boots the full
+  PDP against **real PostgreSQL 16 / Redis 7 / RabbitMQ 3.12**.
+- `rbac-client-spring-boot-starter` (9): `DefaultAccessClientMetricsTest` 5 (new —
+  L1/L2 hit-miss, decision latency by source, fetch success/failure, fail-closed,
+  no-sink boot) + `InvalidationSubscriberIntegrationTest` 4 (incl. adapter
+  auto-wired + event counter).
 
-**Last root cause (gotcha #22) fixed in two places:**
-1. `VersionService.current()` now reads the version **serializer-agnostic**
+**What changed (uncommitted — see `git status`):**
+- PDP: `micrometer-registry-otlp` dep; `GrantService` records `rbac.pdp.decision`
+  (timer, per operation) + `rbac.pdp.cache` (L2 hit/miss); `InvalidationOnCommit`
+  records `rbac.pdp.invalidation.published`/`.lost` (the "lost" counter = bus-outage
+  alarm); `application.yml` has the `OTLP_METRICS_ENDPOINT` knob.
+- Starter: new `RbacClientMetrics` sink interface (no Micrometer import, no-op
+  default) + public `MicrometerRbacClientMetrics` adapter; auto-wired **only when a
+  `MeterRegistry` bean exists** (`@ConditionalOnClass` + bean-factory lookup);
+  `DefaultAccessClient` records `rbac.client.cache` (L1/L2 hit-miss),
+  `rbac.client.decision` (timer tagged with serving source l1|l2|pdp|error),
+  `rbac.client.pdp.fetch` (success/failure), `rbac.client.invalidation.events`.
+  `micrometer-core` is **optional** — an L1-only host without an observability
+  stack still boots (ADR D5).
+- **Next action: commit** (user deferred it deliberately), then §11 item 5.
+
+**Previously committed (HEAD `e09deae`):** Testcontainers integration tests
+(green) + gotcha #22 fix, in two commits (`2ffc101`, `d1dca98`) + docs (`e09deae`).
+Gotcha #22 was fixed in two places:
+1. `VersionService.current()` reads the version **serializer-agnostic**
    (`Object` + `toString()`) — robust to whatever template a host context provides.
 2. `RedisConfig` is now a **pure-String** `StringRedisTemplate` (the Jackson value
    serializer is gone). `GrantCache` already owned its Jackson serialization
@@ -31,17 +49,16 @@ green, and committed. `mvn clean verify` → **18 tests, 0 failures, BUILD SUCCE
    (pure-String) template. Previously the Jackson value serializer **double-encoded**
    the value (a quoted JSON string), which would have broken every cross-module L2 read.
 
-**Next session:** §11 item 4 (Prometheus metrics) or item 5 (partition
-roll-forward + 3-month retention runbook).
-
-**Fixed & verified green across the two IT sessions** (each fix made the next layer
+**Fixed & verified green across the three sessions** (each fix made the next layer
 fail, in order):
 1. `V2__audit.sql` partition syntax (gotcha #18) → Flyway applies V1+V2 on real PG 16.
 2. `@JdbcTypeCode(SqlTypes.JSON)` on `ResourceType.dimensionSchema` /
    `ProfileScope.dimensions` (gotcha #19) → Hibernate validation passes, **context boots**.
 3. `AuditService` drops the `ts` parameter — column `default now()` instead
    (gotcha #21) → admin API returns 201, `audit_change`/`audit_decision` rows land.
-4. Gotcha #22 (version read + L2 wire format) → **all 18 tests green**.
+4. Gotcha #22 (version read + L2 wire format) → ITs green.
+5. Metrics session: Boot-test-observability gotcha (#23) + Micrometer 1.15 API
+   drift (#24) → **all 25 tests green**.
 
 **Boot 3.5.16** (upgraded from 3.2.5) is deliberate — see gotchas #6 and #17.
 
@@ -226,11 +243,11 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
 # PDP:   mvn -pl access-service spring-boot:run   (needs Postgres, Redis, RabbitMQ)
 ```
 
-- **Build status: GREEN (2026-10-15).** `mvn clean verify` → **18 tests, 0
-  failures**: `access-service` 15 (`RbacResolverTest` 7 + `AdminServiceTest` 5 +
-  `AccessServiceIntegrationTest` 3) and `rbac-client-spring-boot-starter` 3
-  (`InvalidationSubscriberIntegrationTest` — autoconfig beans, bus→L1 eviction,
-  L2 shared-key read).
+- **Build status: GREEN (2026-10-15).** `mvn clean verify` → **25 tests, 0
+  failures**: `access-service` 16 (`RbacResolverTest` 7 + `AdminServiceTest` 5 +
+  `AccessServiceIntegrationTest` 4, incl. metrics) and
+  `rbac-client-spring-boot-starter` 9 (`DefaultAccessClientMetricsTest` 5 +
+  `InvalidationSubscriberIntegrationTest` 4).
 - Integration tests boot the PDP against **real Postgres/Redis/RabbitMQ via
   Testcontainers** (`@Testcontainers(disabledWithoutDocker = true)` — they *skip*,
   not fail, without Docker; gotcha #17).
@@ -351,6 +368,31 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     pure-String template so `GrantCache`'s own Jackson serialization is the L2 wire
     format the starter's `L2Cache` expects (the Jackson value serializer would have
     double-encoded every L2 value and broken cross-module reads).
+23. **Boot's test policy disables metrics export in `@SpringBootTest`** — the
+    `DisableObservabilityContextCustomizer` (spring-boot-test-autoconfigure) sets
+    `management.defaults.metrics.export.enabled=false` via a `TestPropertyValues`
+    source added with **higher priority than `@SpringBootTest(properties=...)`**,
+    so tests get a `SimpleMeterRegistry` even with `micrometer-registry-otlp` on
+    the classpath (verified via the condition report:
+    `OnMetricsExportEnabledCondition => false`). Don't fight it: it's Boot
+    deliberately keeping tests from pushing to a collector. Test the *meters* on
+    whatever `MeterRegistry` is injected (backend-agnostic — that's what the app
+    code does) and assert the OTLP registry class is on the classpath
+    (`Class.forName`), not the test-environment registry type. Opting out via
+    `spring.test.observability.auto-configure=false` inline did **not** work either
+    (the customizer reads the flag before inline properties are applied).
+24. **Micrometer 1.15 API drift (Boot 3.5 BOM)** — (a) `Timer.count()` returns
+    **`long`**, not `double` (AssertJ `isEqualTo(1.0)` on a long fails at runtime —
+    use `1L`); `Counter.count()` is still `double`. (b) `registry.get(name)` returns
+    a `RequiredSearch` whose `.counter()`/`.timer()` **throw `MeterNotFoundException`**
+    for absent meters — use the lenient `registry.find(name).tags(...).counters()` /
+    `.timers()` (collections) when the meter may not exist yet (e.g. asserting a
+    "miss" count that is zero). (c) Spring 6 `ClientHttpRequest`/`ClientHttpResponse`
+    stubs must implement the abstract `getAttributes()`/`getHeaders()`/`close()`,
+    and `HttpRequest.getAttributes()` must return a **mutable** map (RestClient
+    mutates it — `Map.of()` throws `UnsupportedOperationException`). (d)
+    `StringRedisTemplate.opsForValue()` in spring-data-redis 3.5 is **non-generic**
+    (`ValueOperations<K,V>`), so overrides must match exactly.
 
 ---
 
@@ -367,10 +409,18 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
 - `AdminServiceTest` (5 green tests) pinning `setScope` in-place upsert (never delete+insert) and the 400 dimension-set validation.
 - **Testcontainers integration tests GREEN (2026-10-15)** — `AccessServiceIntegrationTest`
   (boot/migrations/partitions · admin→bump→invalidation→change-audit · full decision
-  flow + L2 key + revocation) and `InvalidationSubscriberIntegrationTest`
-  (autoconfig beans · bus→L1 eviction · L2 shared-`CacheKeys` contract). All 18
-  tests pass; gotcha #22 fixed (serializer-agnostic version read + pure-String
-  `StringRedisTemplate`, which also fixed the L2 wire format for the starter).
+  flow + L2 key + revocation · metrics) and `InvalidationSubscriberIntegrationTest`
+  (autoconfig beans · bus→L1 eviction · L2 shared-`CacheKeys` contract · metrics
+  adapter + event counter). 25 tests pass; gotcha #22 fixed (serializer-agnostic
+  version read + pure-String `StringRedisTemplate`, which also fixed the L2 wire
+  format for the starter).
+- **Observability metrics GREEN (2026-10-15, UNCOMMITTED)** — OTLP/OpenTelemetry
+  backend (team choice over plain Prometheus registry for CNCF alignment). PDP:
+  `rbac.pdp.decision` / `rbac.pdp.cache` / `rbac.pdp.invalidation.{published,lost}`.
+  Starter: `rbac.client.{cache,decision,pdp.fetch,invalidation.events}` via the
+  no-op-by-default `RbacClientMetrics` sink (Micrometer optional). Pinned by
+  `AccessServiceIntegrationTest.metrics_…` + `DefaultAccessClientMetricsTest`
+  (5 tests) + the starter IT adapter assertions.
 
 **Intentionally NOT done (team review completed 2026-10-14 — see §10):**
 - No admin *surface* beyond the JSON API (A5: API/config first — no UI in v1).
@@ -416,13 +466,18 @@ implementation items in §11.
    build fully green (18 tests), committed.
 3. **DONE (2026-10-15)** — the `CacheKeys` contract test
    (`l2ReadUsesTheSharedCacheKeyScheme` in the starter IT) is green.
-4. Wire **Prometheus metrics** for cache hit-rate + decision latency (SLO evidence).
+4. **DONE (2026-10-15, UNCOMMITTED)** — metrics for cache hit-rate + decision
+   latency (SLO evidence), **OpenTelemetry/OTLP backend** (team choice 2026-10-15
+   over a plain Prometheus registry: CNCF-adopted, obsolescence-proofing). PDP +
+   starter instrumented, 9 new tests green (25 total). See §0 for the exact meter
+   names; gotchas #23/#24 capture the Boot-test + Micrometer 1.15 traps.
 5. Write the **partition roll-forward + retention (3 months)** ops runbook.
 6. Only then: the D3 SpEL escape hatch, if the team wants conditional grants.
 
 ---
 
-*Last updated: 2026-10-15 (integration tests GREEN, gotcha #22 fixed, all committed —
-see §0; team review incorporated 2026-10-14, ADR-001 marked Accepted). If you change
+*Last updated: 2026-10-15 (integration tests GREEN + committed; **OTel/OTLP metrics
+GREEN but UNCOMMITTED** — next action is the commit, see §0; team review incorporated
+2026-10-14, ADR-001 marked Accepted; metrics backend chosen 2026-10-15). If you change
 a decision (D1–D10), update the ADR decision-log first, then this file — keep the three
 artifacts in agreement.*

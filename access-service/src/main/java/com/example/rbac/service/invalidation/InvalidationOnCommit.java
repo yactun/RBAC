@@ -2,6 +2,7 @@ package com.example.rbac.service.invalidation;
 
 import com.example.rbac.model.dto.InvalidationEvent;
 import com.example.rbac.service.cache.VersionService;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -33,10 +34,12 @@ public class InvalidationOnCommit {
 
     private final VersionService version;
     private final InvalidationPublisher publisher;
+    private final MeterRegistry metrics;
 
-    public InvalidationOnCommit(VersionService version, InvalidationPublisher publisher) {
+    public InvalidationOnCommit(VersionService version, InvalidationPublisher publisher, MeterRegistry metrics) {
         this.version = version;
         this.publisher = publisher;
+        this.metrics = metrics;
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
@@ -44,7 +47,9 @@ public class InvalidationOnCommit {
         try {
             long v = version.bump();
             publisher.publish(InvalidationEvent.all(v));
+            metrics.counter("rbac.pdp.invalidation.published").increment();
         } catch (RuntimeException e) {
+            metrics.counter("rbac.pdp.invalidation.lost").increment();
             // The change is COMMITTED — a 500 here would be a lie. Log loudly so
             // ops can re-trigger; clients degrade to TTL-bounded staleness (D10).
             log.error("Grant change committed but invalidation was NOT published; "

@@ -1,6 +1,7 @@
 package com.example.rbac.client.it;
 
 import com.example.rbac.client.AccessClient;
+import com.example.rbac.client.RbacClientMetrics;
 import com.example.rbac.client.cache.L1Cache;
 import com.example.rbac.client.cache.L2Cache;
 import com.example.rbac.client.invalidation.InvalidationSubscriber;
@@ -9,6 +10,8 @@ import com.example.rbac.model.CacheKeys;
 import com.example.rbac.model.dto.GrantSet;
 import com.example.rbac.model.dto.InvalidationEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
@@ -82,6 +85,8 @@ class InvalidationSubscriberIntegrationTest {
     @Autowired RabbitAdmin rabbitAdmin;
     @Autowired StringRedisTemplate redisTemplate;
     @Autowired ObjectMapper json;
+    @Autowired RbacClientMetrics metrics;
+    @Autowired MeterRegistry registry;
 
     @Test
     void autoConfigurationWiresClientAndSubscriber() {
@@ -89,6 +94,15 @@ class InvalidationSubscriberIntegrationTest {
         assertThat(l2).as("the L2 cache bean (Redis on the classpath)").isNotNull();
         assertThat(subscriber).as("the invalidation subscriber bean").isNotNull();
         assertThat(subscriber.isRunning()).as("SmartLifecycle started the listener container").isTrue();
+    }
+
+    @Test
+    void autoConfiguration_wiresMicrometerMetrics_whenRegistryPresent() {
+        // actuator is on the test classpath -> a MeterRegistry bean exists, so the
+        // auto-config must provide the Micrometer adapter (not the no-op sink)
+        assertThat(metrics).as("auto-configured sink is the Micrometer adapter")
+                .isNotSameAs(RbacClientMetrics.NONE);
+        assertThat(registry).isNotNull();
     }
 
     @Test
@@ -112,6 +126,11 @@ class InvalidationSubscriberIntegrationTest {
         // The subscriber must raise the local version and clear L1
         Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
                 assertThat(l1.get("u-1", Set.of("ops"))).as("L1 evicted by the bus event").isNull());
+
+        // ...and the event must be counted (SLO/ops evidence)
+        Counter events = registry.get("rbac.client.invalidation.events").counter();
+        assertThat(events).as("invalidation events are counted").isNotNull();
+        assertThat(events.count()).isGreaterThanOrEqualTo(1);
     }
 
     @Test

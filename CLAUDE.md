@@ -22,8 +22,9 @@ mvn -pl access-service -am spring-boot:run         # run the PDP
 ```
 
 - The PDP only boots against live PostgreSQL, Redis and RabbitMQ (Hibernate `ddl-auto: validate` against the Flyway schema, plus a broker connection). There's no embedded or fake setup yet. Connection settings are env vars with localhost defaults in `access-service/src/main/resources/application.yml` (`DB_URL`, `DB_USER`, `DB_PASSWORD`, `REDIS_HOST`, `REDIS_PORT`, `RABBIT_HOST`, …).
-- The unit tests are `RbacResolverTest` (7) and `AdminServiceTest` (5) (no infrastructure needed; they run on any JVM).
+- The unit tests are `RbacResolverTest` (7), `AdminServiceTest` (5), and `DefaultAccessClientMetricsTest` (5, starter — client metrics wiring, no infra needed). They run on any JVM.
 - Integration tests (Testcontainers, need Docker — they skip without it): `AccessServiceIntegrationTest` (access-service) and `InvalidationSubscriberIntegrationTest` (starter). **Green as of 2026-10-15** — see AGENTS.md §0.
+- Observability: metrics are recorded via the **Micrometer API** and exported as **OTLP** (OpenTelemetry). PDP uses `micrometer-registry-otlp`; the starter's Micrometer is an **optional** dependency behind a no-op-by-default `RbacClientMetrics` sink. Meter names and the OTLP endpoint knob are in AGENTS.md §0/§9.
 - There is no linter or formatter configured. The `-Xlint:unchecked` warning on `RbacResolver` is expected.
 - This is a local-only git repository (no remote). Commit after each green milestone.
 
