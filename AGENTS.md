@@ -35,7 +35,7 @@
   `rbac.client.pdp.fetch` (success/failure), `rbac.client.invalidation.events`.
   `micrometer-core` is **optional** — an L1-only host without an observability
   stack still boots (ADR D5).
-**§11 item 5 done this session (uncommitted — see `git status`):** the
+**§11 item 5 done this session (committed `d4a6cb6`):** the
 **partition roll-forward + 3-month retention ops runbook** (D8's "job + runbook"):
 - `ops/rotate_audit_partitions.sql` — **idempotent** psql script: creates
   next month's `<parent>_<YYYY_MM>` partition for `audit_decision` +
@@ -52,9 +52,9 @@
   verified the stale partitions existed before the drop.
 - `V2__audit.sql` header now points to the runbook + script (safe: V2 had no
   successful application anywhere — gotcha #18).
-- **Next action: commit** this runbook work, then §11 item 6 (D3 SpEL escape
-  hatch — **gated on the team** wanting conditional grants; do not build
-  unilaterally).
+- **Next action:** §11 item 6 (D3 SpEL escape hatch — **gated on the team**
+  wanting conditional grants; do not build unilaterally). Handoff items 1–5
+  are complete and committed; the working tree is clean.
 
 **Previously committed (HEAD `e09deae`):** Testcontainers integration tests
 (green) + gotcha #22 fix, in two commits (`2ffc101`, `d1dca98`) + docs (`e09deae`).
@@ -440,7 +440,7 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
   no-op-by-default `RbacClientMetrics` sink (Micrometer optional). Pinned by
   `AccessServiceIntegrationTest.metrics_…` + `DefaultAccessClientMetricsTest`
   (5 tests) + the starter IT adapter assertions.
-- **Partition roll-forward + 3-month retention ops (2026-10-15, UNCOMMITTED)** —
+- **Partition roll-forward + 3-month retention ops (2026-10-15, committed `d4a6cb6`)** —
   `ops/rotate_audit_partitions.sql` (idempotent: create next month's partition,
   drop months older than the rolling 3-month window, never touches `*_default`)
   + `RUNBOOK-audit-partitions.md` (procedure, archive option, cron, monitoring
@@ -500,18 +500,20 @@ implementation items in §11.
    obsolescence-proofing). PDP + starter instrumented, 9 new tests green (25
    total). See §0 for the exact meter names; gotchas #23/#24 capture the
    Boot-test + Micrometer 1.15 traps.
-5. **DONE (2026-10-15, UNCOMMITTED)** — **partition roll-forward + retention
-   (3 months)** ops runbook: `ops/rotate_audit_partitions.sql` (idempotent
-   script) + `RUNBOOK-audit-partitions.md`, verified on real PG 16 (see §0).
+5. **DONE (2026-10-15, committed `d4a6cb6`)** — **partition roll-forward +
+   retention (3 months)** ops runbook: `ops/rotate_audit_partitions.sql`
+   (idempotent script) + `RUNBOOK-audit-partitions.md`, verified on real PG 16
+   (see §0).
 6. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
    (conditional grants). Gated on a team decision; do not build unilaterally.
 
 ---
 
-*Last updated: 2026-10-15 (integration tests GREEN + committed; **OTel/OTLP metrics
-committed `8bf6fa8`**; **partition roll-forward + 3-month retention runbook +
-idempotent script done and PG-16-verified, UNCOMMITTED** — next action is that
-commit, see §0; handoff items 1–5 complete, item 6 gated on the team; team review
-incorporated 2026-10-14, ADR-001 marked Accepted; metrics backend chosen 2026-10-15).
+*Last updated: 2026-10-15 (integration tests GREEN + committed; **OTel/OTLP
+metrics committed `8bf6fa8`**; **partition roll-forward + 3-month retention
+runbook + idempotent script committed `d4a6cb6`** (PG-16-verified); handoff
+items 1–5 complete + committed, item 6 (SpEL escape hatch) gated on the team;
+team review incorporated 2026-10-14, ADR-001 marked Accepted; metrics backend
+chosen 2026-10-15).
 If you change a decision (D1–D10), update the ADR decision-log first, then this
 file — keep the three artifacts in agreement.*
