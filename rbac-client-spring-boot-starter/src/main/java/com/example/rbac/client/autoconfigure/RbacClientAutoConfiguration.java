@@ -6,6 +6,7 @@ import com.example.rbac.client.RbacClientMetrics;
 import com.example.rbac.client.RbacClientProperties;
 import com.example.rbac.client.cache.L1Cache;
 import com.example.rbac.client.cache.L2Cache;
+import com.example.rbac.client.cache.RbacL2Redis;
 import com.example.rbac.client.invalidation.InvalidationHandler;
 import com.example.rbac.client.invalidation.InvalidationSubscriber;
 import com.example.rbac.client.security.UserContextResolver;
@@ -18,12 +19,14 @@ import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.annotation.Bean;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.context.request.RequestAttributes;
@@ -59,10 +62,44 @@ public class RbacClientAutoConfiguration {
         return new L1Cache(props.getL1Ttl(), props.getL1MaxSize());
     }
 
+    /**
+     * L2 shared cache (Redis), reading via the shared {@link com.example.rbac.model.CacheKeys}
+     * scheme (ADR D5). Two mutually-exclusive wirings, selected by {@code rbac.client.redis.host}:
+     * <ul>
+     *   <li><b>Dedicated</b> — when {@code rbac.client.redis.host} is set, the starter builds its
+     *       own connection (see {@link #rbacL2ConnectionFactory}) so it never reads grant sets from
+     *       the host app's session/data Redis. Preferred in production.</li>
+     *   <li><b>Host fallback</b> — when unset, reuse the host application's
+     *       {@code StringRedisTemplate} (historical behavior; fine only when that Redis is the
+     *       shared one and read-restricted to {@code rbac:grants:*}).</li>
+     * </ul>
+     */
+    @Bean
+    @ConditionalOnMissingBean(name = "rbacL2Redis")
+    @ConditionalOnClass({StringRedisTemplate.class, LettuceConnectionFactory.class})
+    @ConditionalOnExpression("'${rbac.client.redis.host:}' != ''")
+    public RbacL2Redis rbacL2Redis(RbacClientProperties props) {
+        RbacClientProperties.Redis r = props.getRedis();
+        return new RbacL2Redis(r.getHost(), r.getPort(), r.getPassword(), r.getDatabase());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnClass({StringRedisTemplate.class, LettuceConnectionFactory.class})
+    @ConditionalOnExpression("'${rbac.client.redis.host:}' != ''")
+    public L2Cache rbacL2CacheDedicated(RbacL2Redis dedicated, ObjectMapper json) {
+        // RbacL2Redis owns a private connection (its own LettuceConnectionFactory + template)
+        // and is a DisposableBean, so the pool is closed on shutdown. It implements none of
+        // the Redis factory interfaces, so it cannot be picked up by the host's Redis
+        // auto-configuration or type-based autowiring.
+        return new L2Cache(dedicated.template(), json);
+    }
+
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnClass(StringRedisTemplate.class)
     @ConditionalOnBean(StringRedisTemplate.class)
+    @ConditionalOnExpression("'${rbac.client.redis.host:}' == ''")
     public L2Cache rbacL2Cache(StringRedisTemplate redis, ObjectMapper json) {
         return new L2Cache(redis, json);
     }

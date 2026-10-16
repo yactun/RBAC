@@ -6,9 +6,33 @@
 
 ---
 
-## 0. STATUS — where things stand (2026-10-15, **GREEN — handoff items 1–5 done**)
+## 0. STATUS — where things stand (2026-10-16, **GREEN — implementation review done; ADR-002 proposed; B2 shipped**)
 
-**Committed this session:**
+**This session (2026-10-16) — implementation-vs-design review + hardening start:**
+- Ran a full **implementation-vs-design review**; every claim verified against source
+  (file:line evidence) → `REVIEW-implementation-vs-design.md` (shareable).
+- Drafted **`ADR-002-security-audit-and-semantics.md`** (Status: **Proposed**, pending team
+  answers on §7 Q1–Q5). It records the 5 decisions the review forced: **S1** enforce S2S
+  auth on the PDP + actor-from-principal (enforces D2's stated mitigation); **T1** template
+  = layout catalog, not a grant-bundle (fixes `visible:false` unreachable + revoke no-op);
+  **A1** decision audit moves to the PEP (resolves the D8↔D9 contradiction); **S2** scopes
+  fail-closed (`values()` throws on unknown dim, `[]`=wildcard, add DELETE); **R1**
+  change-audit retention ≥ 1 yr + `granted_at`. **These are gated — do not code until
+  Accepted** (standing instruction: decision changes go to a new ADR first).
+- **Shipped B2 (Track B, decision-agnostic, no ADR needed):** starter **L2 Redis isolation** —
+  new `rbac.client.redis.{host,port,password,database}` config; when set, the starter uses a
+  dedicated, self-managed connection (`cache/RbacL2Redis`, implements none of the Redis
+  factory interfaces so it can't be confused with the host's); when unset, it falls back to the
+  host's `StringRedisTemplate` (unchanged behavior). New `RbacClientRedisIsolationTest` proves
+  the dedicated path is taken and the L2 template is **not** the host's, even when the host has
+  its own Redis. DESIGN §7 documents the config + read-only ACL requirement.
+  `mvn clean verify` → **BUILD SUCCESS** (starter now 10 tests).
+- **Next (per `REVIEW-implementation-vs-design.md` §4):** team answers ADR-002 §7 → implement
+  A1–A5 (gated); then Track C (Redis SPOF bypass, fresh-replica L2 seed, subscriber durability,
+  durable-queue leak, timeouts/stampede, outbox) and Track D (profileSet-keyed cache, dedup,
+  404/409, JSON-escape, bounded @Async, catalog, `grantedBy` w/o per-check DB hit, test gaps).
+
+**Previously (2026-10-15) — handoff items 1–5 done, committed:**
 - `8bf6fa8` — observability metrics (former §11 item 4) with an
   **OpenTelemetry/OTLP backend** (team choice 2026-10-15: CNCF-adopted framework,
   obsolescence-proofing; Prometheus may stay a backend *behind* the collector),
@@ -412,6 +436,24 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     mutates it — `Map.of()` throws `UnsupportedOperationException`). (d)
     `StringRedisTemplate.opsForValue()` in spring-data-redis 3.5 is **non-generic**
     (`ValueOperations<K,V>`), so overrides must match exactly.
+25. **Never register a `LettuceConnectionFactory` (or any `RedisConnectionFactory`) as a
+    bean from the starter when the host may have its own Redis** — a
+    `LettuceConnectionFactory` also implements `ReactiveRedisConnectionFactory`, so a host's
+    `RedisReactiveAutoConfiguration.reactiveRedisTemplate` (which expects a **single**
+    `ReactiveRedisConnectionFactory`) breaks with `NoUniqueBeanDefinitionException:
+    found 2: redisConnectionFactory, rbacL2ConnectionFactory`, and any host bean injecting
+    `RedisConnectionFactory` by type becomes ambiguous. This is how B2 (L2 Redis isolation,
+    2026-10-16) was first built and first failed. **Fix:** wrap the private connection in a
+    distinct type (`cache/RbacL2Redis`) that implements **none** of the Redis factory
+    interfaces (only `DisposableBean`), holds its own `LettuceConnectionFactory` +
+    `StringRedisTemplate`, and is the only thing the `L2Cache` reads from. The L2 template is
+    built **locally** (not a bean), so it can't be autowired by the host either. Pinned by
+    `RbacClientRedisIsolationTest` (asserts the dedicated path is taken and the L2 template is
+    not the host's `stringRedisTemplate`, even with the host's Redis auto-config active).
+    Related trap while debugging: excluding `RedisAutoConfiguration` to remove the host's
+    template also removed the `redisTemplate` bean that Spring Data Redis's
+    `redisReferenceResolver` needs → context fails to load. Keep the host auto-config active
+    in the test and prove isolation by *identity*, not by absence.
 
 ---
 
@@ -509,10 +551,14 @@ implementation items in §11.
 
 ---
 
-*Last updated: 2026-10-15 (integration tests GREEN + committed; **OTel/OTLP
-metrics committed `8bf6fa8`**; **partition roll-forward + 3-month retention
-runbook + idempotent script committed `d4a6cb6`** (PG-16-verified); handoff
-items 1–5 complete + committed, item 6 (SpEL escape hatch) gated on the team;
+*Last updated: 2026-10-16 (**implementation-vs-design review done** →
+`REVIEW-implementation-vs-design.md`; **ADR-002 proposed** (S1/T1/A1/S2/R1, pending team §7);
+**B2 L2 Redis isolation shipped** — `rbac.client.redis.*` + `RbacL2Redis` +
+`RbacClientRedisIsolationTest`, `mvn clean verify` GREEN (starter 10 tests); gotcha #25
+added; DESIGN §7 documents the config + read-only ACL). Prior: 2026-10-15
+(integration tests GREEN + committed; **OTel/OTLP metrics committed `8bf6fa8`**; **partition
+roll-forward + 3-month retention runbook + idempotent script committed `d4a6cb6`** (PG-16-verified);
+handoff items 1–5 complete + committed, item 6 (SpEL escape hatch) gated on the team;
 team review incorporated 2026-10-14, ADR-001 marked Accepted; metrics backend
 chosen 2026-10-15).
 If you change a decision (D1–D10), update the ADR decision-log first, then this

@@ -24,6 +24,20 @@ public class RbacClientProperties {
      *  want a shared (competitive-consumption) queue across instances. */
     private String invalidationQueue = null;
 
+    /**
+     * Dedicated Redis for the shared L2 cache (ADR D5). When {@code host} is set, the
+     * starter builds its <b>own</b> {@code StringRedisTemplate} for L2 instead of reusing
+     * the host application's one — so the client never reads grant sets from the app's
+     * session/data Redis (which it could not trust, and which could write forged
+     * {@code GrantSet}s if it shares credentials). Leave {@code host} unset to fall back
+     * to the host's {@code StringRedisTemplate} (the historical behavior).
+     *
+     * <p>Deployment requirement when a shared Redis is used: restrict this connection to
+     * <b>read-only</b> on {@code rbac:grants:*} via Redis ACL (the client only reads L2;
+     * only the PDP writes it).
+     */
+    private Redis redis = new Redis();
+
     public String getBaseUrl() {
         return baseUrl;
     }
@@ -62,5 +76,57 @@ public class RbacClientProperties {
 
     public void setInvalidationQueue(String invalidationQueue) {
         this.invalidationQueue = invalidationQueue;
+    }
+
+    public Redis getRedis() {
+        return redis;
+    }
+
+    public void setRedis(Redis redis) {
+        this.redis = (redis == null) ? new Redis() : redis;
+    }
+
+    /** Connection settings for the starter's dedicated L2 Redis (prefix {@code rbac.client.redis}). */
+    public static class Redis {
+        /** Redis host. When set (non-blank), the starter uses a dedicated connection for L2. */
+        private String host;
+        /** Redis port (default 6379). */
+        private Integer port = 6379;
+        /** Redis password (optional). */
+        private String password;
+        /** Redis logical database (default 0). */
+        private Integer database = 0;
+
+        public String getHost() {
+            return host;
+        }
+
+        public void setHost(String host) {
+            this.host = host;
+        }
+
+        public Integer getPort() {
+            return port;
+        }
+
+        public void setPort(Integer port) {
+            this.port = (port == null) ? 6379 : port;
+        }
+
+        public String getPassword() {
+            return password;
+        }
+
+        public void setPassword(String password) {
+            this.password = password;
+        }
+
+        public Integer getDatabase() {
+            return database;
+        }
+
+        public void setDatabase(Integer database) {
+            this.database = (database == null) ? 0 : database;
+        }
     }
 }
