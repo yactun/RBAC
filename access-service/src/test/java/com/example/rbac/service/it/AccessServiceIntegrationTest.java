@@ -107,7 +107,8 @@ class AccessServiceIntegrationTest {
     void contextBoots_flywayApplied_auditPartitioned_redisAndBusReachable() {
         Integer applied = jdbc.queryForObject(
                 "select count(*) from flyway_schema_history where success", Integer.class);
-        assertThat(applied).as("Flyway applied V1 + V2 + V3 on the real PostgreSQL").isGreaterThanOrEqualTo(3);
+        assertThat(applied).as("Flyway applied V1 + V2 + V3 + V4 on the real PostgreSQL")
+                .isGreaterThanOrEqualTo(4);
 
         Integer auditTables = jdbc.queryForObject(
                 "select count(*) from pg_class where relname like 'audit_decision%'", Integer.class);
@@ -219,6 +220,22 @@ class AccessServiceIntegrationTest {
                 Map.of("name", profile, "description", "integration test"))).isEqualTo(201);
         assertThat(post("/v1/admin/profiles/" + profile + "/permissions", Map.of("key", "orders:create")))
                 .isEqualTo(200);
+        // R1 (ADR-002): the live grant row records its origin — "who granted this
+        // active grant, and when?" stays answerable from the model itself.
+        String grantedBy = jdbc.queryForObject(
+                "select pp.granted_by from profile_permission pp "
+                        + "join profile p on p.id = pp.profile_id "
+                        + "join permission k on k.id = pp.permission_id "
+                        + "where p.name = ? and k.key = ?",
+                String.class, profile, "orders:create");
+        assertThat(grantedBy).as("the live grant row records the actor").isEqualTo("it-qa");
+        Double grantedAt = jdbc.queryForObject(
+                "select extract(epoch from pp.granted_at) from profile_permission pp "
+                        + "join profile p on p.id = pp.profile_id "
+                        + "join permission k on k.id = pp.permission_id "
+                        + "where p.name = ? and k.key = ?",
+                Double.class, profile, "orders:create");
+        assertThat(grantedAt).as("granted_at is stamped (DB clock)").isGreaterThan(1_600_000_000.0);
         assertThat(post("/v1/admin/resource-types", Map.of(
                 "name", "orders",
                 "ownerService", "orders-svc",

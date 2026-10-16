@@ -1,12 +1,15 @@
-# RUNBOOK — audit partition rotation (roll-forward + 3-month retention)
+# RUNBOOK — audit partition rotation (roll-forward + split retention)
 
 > Scope: the monthly `audit_decision` / `audit_change` partitions (PostgreSQL,
 > created by `V2__audit.sql`; design §5.3, ADR D8).
-> Retention policy: **rolling 3 months** (current month + the two previous),
-> team-confirmed 2026-10-14.
+> Retention policy: **SPLIT windows** (ADR-002 R1, team-confirmed 2026-10-16;
+> SOX/ISO 27001 norm for change records) —
+> `audit_decision` → **rolling 3 months** (high volume; current + 2 previous),
+> `audit_change` → **rolling 12 months** (compliance floor: "who granted this
+> active grant, and when?" must stay answerable).
 > Rotation script: [`ops/rotate_audit_partitions.sql`](ops/rotate_audit_partitions.sql)
 > — **idempotent**, safe to run repeatedly (cron or manual), verified against
-> PostgreSQL 16.15 (roll-forward, retention, idempotency, default-partition
+> PostgreSQL 16.15 (roll-forward, split retention, idempotency, default-partition
 > safety net).
 
 ---
@@ -24,7 +27,7 @@
   never touched).
 - Retention: dropping a monthly partition is a **fast, metadata-only**
   `DROP TABLE` (the pages are unlinked, not deleted row-by-row) — this is why
-  partitioning was chosen: 3-month retention is a cheap `DROP`, not a `DELETE`.
+  partitioning was chosen: retention is a cheap `DROP`, not a `DELETE`.
 
 ## 2. The monthly procedure (manual)
 
@@ -39,9 +42,11 @@ What it does (see the script header for the full contract):
 1. **Roll-forward** — for each of `audit_decision` and `audit_change`, creates
    next month's partition if it does not exist yet:
    `roll-forward: created audit_decision_2026_11` (NOTICE, once per month).
-2. **Retention** — drops monthly partitions strictly older than
-   `current_month − 2 months` (lexicographic `YYYY_MM` comparison, year-safe):
-   `retention: dropped audit_decision_2026_08` (NOTICE per drop).
+2. **Retention** — drops monthly partitions strictly older than the parent's
+   window (lexicographic `YYYY_MM` comparison, year-safe):
+   `audit_decision` → `current_month − 2 months`, `audit_change` →
+   `current_month − 11 months`:
+   `retention: dropped audit_decision_2026_08 (window: 3 months)` (NOTICE per drop).
 
 **Silent output = nothing to do** (idempotent). Suggested timing: around the
 **25th of each month** — creates next month's partition a week early and drops
@@ -116,15 +121,16 @@ select c.relname, pg_size_pretty(pg_total_relation_size(c.oid)) as size
 |---|---|---|
 | `*_default` partition has rows | Roll-forward was missed for some month | 1) Create the missing month's partition: `create table audit_decision_2026_11 partition of audit_decision for values from ('2026-11-01') to ('2026-12-01');` (same for `audit_change`). **New partitions do NOT pull in existing rows** — 2) move the stranded rows: `insert into audit_decision select * from audit_decision_default where ts >= '2026-11-01' and ts < '2026-12-01'; delete from audit_decision_default where ts >= '2026-11-01' and ts < '2026-12-01';` (repeat per month/partition). |
 | Rotation script errors on permissions | Run as a role without `CREATE`/`DROP` on the schema | Use the table-owning role (see §3). |
-| A month was dropped too early (human error outside the script) | `DROP TABLE` on a partition is **irreversible** | Only an archive dump (if one exists, §2) restores it. This is why the script restricts drops to `<parent>_<YYYY_MM>` partitions of the two audit parents, strictly older than the 3-month window, and prints a NOTICE per drop — read the output. |
+| A month was dropped too early (human error outside the script) | `DROP TABLE` on a partition is **irreversible** | Only an archive dump (if one exists, §2) restores it. This is why the script restricts drops to `<parent>_<YYYY_MM>` partitions of the two audit parents, strictly older than the parent's window (3 months for `audit_decision`, 12 for `audit_change`), and prints a NOTICE per drop with the window — read the output. |
 | `ERROR: partition ... conflicts with existing partition` | A manual/legacy partition with the same name or overlapping range exists | List partitions (§4), align the ranges, re-run. |
 
 ## 6. Verification checklist (after each run)
 
 - [ ] Expected NOTICEs were printed (creation / drops) — or silence (no-op).
 - [ ] Exit code 0 (`ON_ERROR_STOP=1`).
-- [ ] Inventory query (§4) shows: current month, next month, and the two
-      previous months — for **both** parents — plus both `*_default`.
+- [ ] Inventory query (§4) shows: `audit_decision` — current, next, and the two
+      previous months; `audit_change` — current, next, and the eleven previous
+      months; plus both `*_default`.
 - [ ] Both `*_default` partitions still exist and are empty (§4 alert query).
 - [ ] Optional: probe row for next month routes to the new partition:
       `insert into audit_decision (ts, user_id, profile_set, op) values

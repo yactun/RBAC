@@ -2,6 +2,7 @@ package com.example.rbac.service.api;
 
 import com.example.rbac.model.dto.Scope;
 import com.example.rbac.service.audit.AuditService;
+import com.example.rbac.service.domain.Permission;
 import com.example.rbac.service.domain.PermissionRepository;
 import com.example.rbac.service.domain.Profile;
 import com.example.rbac.service.domain.ProfileRepository;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -29,6 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -51,9 +55,11 @@ import static org.mockito.Mockito.when;
 class AdminServiceTest {
 
     private ProfileRepository profiles;
+    private PermissionRepository permissions;
     private ResourceTypeRepository resourceTypes;
     private ProfileScopeRepository scopes;
     private TemplateRepository templates;
+    private JdbcTemplate jdbc;
     private AdminService service;
     private final ObjectMapper json = new ObjectMapper();
 
@@ -63,11 +69,13 @@ class AdminServiceTest {
     @BeforeEach
     void setUp() {
         profiles = mock(ProfileRepository.class);
+        permissions = mock(PermissionRepository.class);
         resourceTypes = mock(ResourceTypeRepository.class);
         scopes = mock(ProfileScopeRepository.class);
         templates = mock(TemplateRepository.class);
+        jdbc = mock(JdbcTemplate.class);
         service = new AdminService(profiles,
-                mock(PermissionRepository.class),
+                permissions,
                 resourceTypes, scopes,
                 templates,
                 mock(ApplicationEventPublisher.class),
@@ -85,7 +93,8 @@ class AdminServiceTest {
                         // no-op fake: audit persistence is out of scope here
                     }
                 },
-                json);
+                json,
+                jdbc);
     }
 
     private void givenOrdersType(String dimensionSchemaJson) {
@@ -214,6 +223,40 @@ class AdminServiceTest {
         service.deleteScope("alice", "support", "orders");
 
         verify(scopes, never()).delete(any(ProfileScope.class));
+    }
+
+    // --- R1 (ADR-002): live-grant provenance (granted_at / granted_by) ---
+
+    @Test
+    void grantPermission_stampsTheLiveRowWithTheActor() {
+        when(profiles.findByName("support")).thenReturn(Optional.of(p));
+        Permission perm = new Permission("orders:create", null);
+        when(permissions.findByKey("orders:create")).thenReturn(Optional.of(perm));
+
+        service.grantPermission("alice", "support", "orders:create");
+
+        verify(jdbc).update(contains("update profile_permission"), eq("alice"), any(), any());
+    }
+
+    @Test
+    void setScope_stampsTheLiveRowWithTheActor() {
+        givenOrdersType("{\"orgIds\":{\"type\":\"list\"}}");
+        when(scopes.findByProfileIdAndResourceType_Id(any(), any())).thenReturn(Optional.empty());
+
+        service.setScope("alice", "support", "orders", List.of(in("orgIds", 1)));
+
+        verify(jdbc).update(contains("update profile_scope"), eq("alice"), any(), any());
+    }
+
+    @Test
+    void attachTemplate_stampsTheLiveRowWithTheActor() {
+        when(profiles.findByName("support")).thenReturn(Optional.of(p));
+        Template t = new Template("web", "standard");
+        when(templates.findByAppIdAndName("web", "standard")).thenReturn(Optional.of(t));
+
+        service.attachTemplate("alice", "support", "web", "standard");
+
+        verify(jdbc).update(contains("update profile_template"), eq("alice"), any(), any());
     }
 
     @Test

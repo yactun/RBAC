@@ -19,6 +19,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -49,11 +50,13 @@ public class AdminService {
     private final OutboxService outbox;
     private final AuditService audit;
     private final ObjectMapper json;
+    private final JdbcTemplate jdbc;
 
     public AdminService(ProfileRepository profiles, PermissionRepository permissions,
                         ResourceTypeRepository resourceTypes, ProfileScopeRepository scopes,
                         TemplateRepository templates, ApplicationEventPublisher events,
-                        OutboxService outbox, AuditService audit, ObjectMapper json) {
+                        OutboxService outbox, AuditService audit, ObjectMapper json,
+                        JdbcTemplate jdbc) {
         this.profiles = profiles;
         this.permissions = permissions;
         this.resourceTypes = resourceTypes;
@@ -63,6 +66,7 @@ public class AdminService {
         this.outbox = outbox;
         this.audit = audit;
         this.json = json;
+        this.jdbc = jdbc;
     }
 
     @Transactional
@@ -85,6 +89,12 @@ public class AdminService {
             p.touch();
             profiles.save(p);
         }
+        // R1 (ADR-002): the live row records the current grant's origin. Flush first so
+        // the join row exists, then stamp it (re-grant refreshes both columns).
+        profiles.flush();
+        jdbc.update("update profile_permission set granted_at = now(), granted_by = ? "
+                        + "where profile_id = ? and permission_id = ?",
+                actor, p.getId(), perm.getId());
         audit.change(actor, "profile", profileName, "grant_permission", "{\"key\":\"" + permissionKey + "\"}");
         publishInvalidation();
     }
@@ -120,6 +130,11 @@ public class AdminService {
                 .orElseGet(() -> new ProfileScope(p.getId(), rt, dimsJson));
         toSave.setDimensions(dimsJson);
         scopes.save(toSave);
+        // R1 (ADR-002): stamp the live row (flush first so an inserted row exists).
+        scopes.flush();
+        jdbc.update("update profile_scope set granted_at = now(), granted_by = ? "
+                        + "where profile_id = ? and resource_type_id = ?",
+                actor, p.getId(), rt.getId());
         Map<String, Object> detail = new LinkedHashMap<>();
         detail.put("resourceType", resourceTypeName);
         detail.put("filters", filters);
@@ -174,6 +189,11 @@ public class AdminService {
         p.getTemplates().add(t);
         p.touch();
         profiles.save(p);
+        // R1 (ADR-002): stamp the live join row (flush first so it exists).
+        profiles.flush();
+        jdbc.update("update profile_template set granted_at = now(), granted_by = ? "
+                        + "where profile_id = ? and template_id = ?",
+                actor, p.getId(), t.getId());
         audit.change(actor, "profile", profileName, "attach_template",
                 "{\"app\":\"" + appId + "\",\"template\":\"" + templateName + "\"}");
         publishInvalidation();
