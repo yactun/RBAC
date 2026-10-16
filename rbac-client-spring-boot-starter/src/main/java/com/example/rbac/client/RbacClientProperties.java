@@ -9,6 +9,12 @@ public class RbacClientProperties {
     /** Base URL of the PDP, e.g. http://access-service. */
     private String baseUrl = "http://localhost:8080";
 
+    /** Connect timeout for PDP REST calls — a hung PDP must not hold request threads indefinitely. */
+    private java.time.Duration connectTimeout = java.time.Duration.ofSeconds(2);
+
+    /** Read (response) timeout for PDP REST calls. */
+    private java.time.Duration readTimeout = java.time.Duration.ofSeconds(5);
+
     /** L1 (Caffeine) TTL. Bounded staleness fallback when the bus is down. */
     private java.time.Duration l1Ttl = java.time.Duration.ofSeconds(60);
 
@@ -44,6 +50,22 @@ public class RbacClientProperties {
 
     public void setBaseUrl(String baseUrl) {
         this.baseUrl = baseUrl;
+    }
+
+    public java.time.Duration getConnectTimeout() {
+        return connectTimeout;
+    }
+
+    public void setConnectTimeout(java.time.Duration connectTimeout) {
+        this.connectTimeout = (connectTimeout == null) ? java.time.Duration.ofSeconds(2) : connectTimeout;
+    }
+
+    public java.time.Duration getReadTimeout() {
+        return readTimeout;
+    }
+
+    public void setReadTimeout(java.time.Duration readTimeout) {
+        this.readTimeout = (readTimeout == null) ? java.time.Duration.ofSeconds(5) : readTimeout;
     }
 
     public java.time.Duration getL1Ttl() {

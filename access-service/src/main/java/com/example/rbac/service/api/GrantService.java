@@ -133,9 +133,30 @@ public class GrantService {
      * fail-closed result, or one transient DB blip would deny the user for the TTL.
      */
     private GrantSet resolveGrants(UserContext user) {
-        long current = version.current();
+        // Redis is a CACHE, not a hard dependency (REVIEW #5): if it is down we must still
+        // serve correct grants from Postgres. Each Redis touch is guarded so a Redis outage
+        // degrades to "compute from Postgres, uncached" instead of a 500. A floor version (0)
+        // is stamped only when we could not read the real one — the PDP is authoritative, so a
+        // client accepts a Postgres-computed result regardless of the stamp.
+        long current;
+        boolean redisUp = true;
+        try {
+            current = version.current();
+        } catch (RuntimeException e) {
+            log.warn("Redis unavailable (version.current); serving from Postgres, degraded: {}", e.toString());
+            current = 0L;
+            redisUp = false;
+        }
 
-        GrantSet cached = cache.get(user.userId(), user.profiles());
+        GrantSet cached = null;
+        if (redisUp) {
+            try {
+                cached = cache.get(user.userId(), user.profiles());
+            } catch (RuntimeException e) {
+                log.warn("Redis unavailable (cache.get); serving from Postgres, degraded: {}", e.toString());
+                redisUp = false;
+            }
+        }
         if (cached != null && cached.version() >= current) {
             metrics.counter("rbac.pdp.cache", "tier", "l2", "result", "hit").increment();
             return cached;
@@ -143,7 +164,13 @@ public class GrantService {
         metrics.counter("rbac.pdp.cache", "tier", "l2", "result", "miss").increment();
 
         GrantSet computed = compute(user, current);
-        cache.put(user.userId(), user.profiles(), computed);
+        if (redisUp) {
+            try {
+                cache.put(user.userId(), user.profiles(), computed);
+            } catch (RuntimeException e) {
+                log.warn("Redis unavailable (cache.put); returning the uncached Postgres result: {}", e.toString());
+            }
+        }
         return computed;
     }
 

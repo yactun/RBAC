@@ -132,8 +132,16 @@ public class RbacClientAutoConfiguration {
                                          ObjectMapper json,
                                          RbacClientMetrics metrics) {
         // Build our own RestClient so we never depend on (or clash with) a
-        // host-app RestClient bean.
-        RestClient rest = RestClient.builder().baseUrl(props.getBaseUrl()).build();
+        // host-app RestClient bean. Connect + read timeouts so a hung PDP cannot
+        // hold request threads indefinitely (REVIEW #10).
+        org.springframework.http.client.SimpleClientHttpRequestFactory factory =
+                new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(props.getConnectTimeout());
+        factory.setReadTimeout(props.getReadTimeout());
+        RestClient rest = RestClient.builder()
+                .baseUrl(props.getBaseUrl())
+                .requestFactory(factory)
+                .build();
         return new DefaultAccessClient(l1, l2.getIfAvailable(), rest, json, metrics);
     }
 

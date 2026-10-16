@@ -6,9 +6,9 @@
 
 ---
 
-## 0. STATUS — where things stand (2026-10-16, **GREEN — implementation review done; ADR-002 proposed; B2 shipped**)
+## 0. STATUS — where things stand (2026-10-16, **GREEN — review done; ADR-002 proposed; B2 + Track C (C1/C4/C5a) shipped**)
 
-**This session (2026-10-16) — implementation-vs-design review + hardening start:**
+**This session (2026-10-16) — implementation-vs-design review + hardening:**
 - Ran a full **implementation-vs-design review**; every claim verified against source
   (file:line evidence) → `REVIEW-implementation-vs-design.md` (shareable).
 - Drafted **`ADR-002-security-audit-and-semantics.md`** (Status: **Proposed**, pending team
@@ -26,11 +26,23 @@
   host's `StringRedisTemplate` (unchanged behavior). New `RbacClientRedisIsolationTest` proves
   the dedicated path is taken and the L2 template is **not** the host's, even when the host has
   its own Redis. DESIGN §7 documents the config + read-only ACL requirement.
-  `mvn clean verify` → **BUILD SUCCESS** (starter now 10 tests).
+- **Shipped Track C (availability hardening, all decision-agnostic):**
+  - **C1 (Redis SPOF bypass, #5):** client `resolve()` now catches an L2 read failure and
+    falls through to the PDP (records `rbac.client.cache{tier=l2,result=error}`) instead of
+    failing the decision; PDP `GrantService.resolveGrants()` degrades to "compute from Postgres,
+    uncached" when the version read / L2 read / L2 write fail (a floor version is stamped only
+    when the real one is unreadable — the PDP is authoritative, so clients accept it). New
+    `GrantServiceRedisDownTest` (2 tests, Mockito-simulated outage) + a client test.
+  - **C4 (durable-queue leak, #8):** `RabbitConfig.pdpManagementQueue` is now bounded
+    (`ttl=60s`, `maxLength=10k`) so the un-consumed queue can no longer grow without limit.
+  - **C5a (timeouts, #10):** the starter's PDP `RestClient` now has configurable connect (2s) +
+    read (5s) timeouts (`rbac.client.connect-timeout` / `.read-timeout`) so a hung PDP can't
+    hold request threads. (C5's stampede protection — Caffeine `get(key, loader)` — still to do.)
+  `mvn clean verify` → **BUILD SUCCESS** (access-service 18 tests, starter 11; total 29).
 - **Next (per `REVIEW-implementation-vs-design.md` §4):** team answers ADR-002 §7 → implement
-  A1–A5 (gated); then Track C (Redis SPOF bypass, fresh-replica L2 seed, subscriber durability,
-  durable-queue leak, timeouts/stampede, outbox) and Track D (profileSet-keyed cache, dedup,
-  404/409, JSON-escape, bounded @Async, catalog, `grantedBy` w/o per-check DB hit, test gaps).
+  A1–A5 (gated); then remaining Track C (fresh-replica L2 seed #6, subscriber durability #7,
+  C5b stampede, outbox #C6) and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape,
+  bounded @Async, catalog, `grantedBy` w/o per-check DB hit, test gaps).
 
 **Previously (2026-10-15) — handoff items 1–5 done, committed:**
 - `8bf6fa8` — observability metrics (former §11 item 4) with an

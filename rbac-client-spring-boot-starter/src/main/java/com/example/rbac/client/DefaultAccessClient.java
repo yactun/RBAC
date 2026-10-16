@@ -146,13 +146,21 @@ public class DefaultAccessClient implements AccessClient, InvalidationHandler {
         metrics.cache("l1", "miss");
 
         if (l2 != null) {
-            g = l2.get(user.userId(), user.profiles());
-            if (g != null && g.version() >= current) {
-                l1.put(user.userId(), user.profiles(), g);
-                metrics.cache("l2", "hit");
-                return new Resolved(g, "l2");
+            try {
+                g = l2.get(user.userId(), user.profiles());
+                if (g != null && g.version() >= current) {
+                    l1.put(user.userId(), user.profiles(), g);
+                    metrics.cache("l2", "hit");
+                    return new Resolved(g, "l2");
+                }
+                metrics.cache("l2", "miss");
+            } catch (RuntimeException e) {
+                // L2 (Redis) is down. Redis is a CACHE, not a hard dependency (REVIEW #5):
+                // bypass this tier and fall through to the PDP instead of failing the whole
+                // decision. The PDP still serves correct grants from Postgres.
+                log.warn("L2 (Redis) read failed; falling through to the PDP: {}", e.toString());
+                metrics.cache("l2", "error");
             }
-            metrics.cache("l2", "miss");
         }
 
         try {

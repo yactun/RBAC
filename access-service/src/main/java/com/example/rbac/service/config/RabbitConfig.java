@@ -31,7 +31,13 @@ public class RabbitConfig {
 
     @Bean
     public Queue pdpManagementQueue() {
-        return QueueBuilder.durable(Bus.EXCHANGE + ".management").build();
+        // REVIEW #8: nothing consumes this queue, so an unbounded durable queue would accumulate
+        // every invalidation ever published. Bound it (message TTL + max length) so it can never
+        // grow without limit; it stays available if a management consumer is ever added.
+        return QueueBuilder.durable(Bus.EXCHANGE + ".management")
+                .ttl(60_000)
+                .maxLength(10_000)
+                .build();
     }
 
     @Bean

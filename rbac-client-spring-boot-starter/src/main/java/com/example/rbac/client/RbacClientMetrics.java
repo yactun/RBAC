@@ -20,7 +20,7 @@ public interface RbacClientMetrics {
     /**
      * Record a cache lookup outcome.
      * @param tier "l1" | "l2"
-     * @param result "hit" | "miss"
+     * @param result "hit" | "miss" | "error" (a tier that failed and was bypassed)
      */
     default void cache(String tier, String result) { }
 

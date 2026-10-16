@@ -134,6 +134,28 @@ class DefaultAccessClientMetricsTest {
         assertThat(count("rbac.client.cache", "tier", "l1", "result", "hit")).isEqualTo(1.0);
     }
 
+    // --- L2 (Redis) down: bypass the tier, fall through to the PDP (REVIEW #5) ---
+
+    @Test
+    void l2Failure_bypassesTier_fallsThroughToPdp_andRecordsError() {
+        L1Cache l1 = freshL1();
+        L2Cache l2 = throwingL2(); // simulates a Redis outage
+        DefaultAccessClient client = client(l1, l2, cannedFactory());
+        UserContext u = user("u-l2down");
+
+        // grants: served from the PDP (Redis bypassed), not an exception
+        GrantSet gs = client.grants(u);
+        assertThat(gs.permissions()).containsExactly("orders:create");
+
+        // check: fail-closed contract still holds, and it resolves via the PDP
+        CheckResult result = client.check(u, "orders:create");
+        assertThat(result.allowed()).isTrue();
+
+        assertThat(count("rbac.client.cache", "tier", "l2", "result", "error")).isEqualTo(1.0);
+        assertThat(count("rbac.client.pdp.fetch", "success", "true")).isEqualTo(1.0);
+        assertThat(timer("rbac.client.decision", "operation", "grants", "source", "pdp")).isNotNull();
+    }
+
     // --- PDP failure: fail-closed + failure is visible in metrics ---
 
     @Test
@@ -263,6 +285,27 @@ class DefaultAccessClientMetricsTest {
                 (proxy, method, args) -> {
                     if ("get".equals(method.getName())) {
                         return raw;
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
+        StringRedisTemplate template = new StringRedisTemplate() {
+            @Override
+            public ValueOperations<String, String> opsForValue() {
+                return ops;
+            }
+        };
+        return new L2Cache(template, json);
+    }
+
+    /** L2 stub: every read throws (simulates a Redis outage). */
+    private L2Cache throwingL2() {
+        @SuppressWarnings("unchecked")
+        ValueOperations<String, String> ops = (ValueOperations<String, String>) Proxy.newProxyInstance(
+                ValueOperations.class.getClassLoader(),
+                new Class<?>[]{ ValueOperations.class },
+                (proxy, method, args) -> {
+                    if ("get".equals(method.getName())) {
+                        throw new IllegalStateException("simulated Redis outage (connection refused)");
                     }
                     throw new UnsupportedOperationException(method.getName());
                 });

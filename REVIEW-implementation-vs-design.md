@@ -163,6 +163,10 @@ Gated on team answers to ADR-002 §7 (Q1–Q5). **No code until Accepted.**
 
 - **ADR-002** (`ADR-002-security-audit-and-semantics.md`) — the decision gate for S1/T1/A1/S2/R1, **Proposed** pending §7.
 - **This review page** (`REVIEW-implementation-vs-design.md`) — evidence + plan, ready to share.
-- **Track B start — B2 (starter Redis isolation):** new `rbac.client.redis.*` config; when set, the starter builds a **dedicated** `StringRedisTemplate` for L2 instead of reusing the host's; the host-template path is unchanged when unset. Plus a boot test. (See the starter `autoconfigure` + `RbacClientProperties`.)
+- **Track B — B2 (starter Redis isolation, #9):** new `rbac.client.redis.{host,port,password,database}` config; when set, the starter uses a **dedicated, self-managed** connection (`cache/RbacL2Redis`) for L2 instead of reusing the host's `StringRedisTemplate`; the host-template path is unchanged when unset. `RbacClientRedisIsolationTest` proves the dedicated path is taken and the L2 template is **not** the host's.
+- **Track C (availability hardening) — C1, C4, C5a:**
+  - **C1 (Redis SPOF bypass, #5):** client falls through to the PDP when an L2 read fails (`rbac.client.cache{tier=l2,result=error}`); PDP `GrantService` degrades to Postgres-computed grants when Redis is down. `GrantServiceRedisDownTest` + a client test.
+  - **C4 (durable-queue leak, #8):** the un-consumed `pdpManagementQueue` is now bounded (TTL + max-length).
+  - **C5a (timeouts, #10):** the starter's PDP `RestClient` has connect (2s) + read (5s) timeouts. (C5b stampede protection still to do.)
 
-**Not yet started (needs the ADR or is next):** B1 (auth, gated on Q1), the Track C fixes, and Track D. Each is a self-contained, testable increment.
+**Not yet started (needs the ADR or is next):** B1 (auth, gated on Q1); the rest of Track C (#6 fresh-replica L2 seed, #7 subscriber durability, C5b stampede, C6 outbox); and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape, bounded `@Async`, explicit catalog, `grantedBy` without a per-check DB hit, the §3 test gaps). Each is a self-contained, testable increment.
