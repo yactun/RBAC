@@ -240,17 +240,45 @@ class AccessServiceIntegrationTest {
         assertThat(grantsResp.getStatusCode()).isEqualTo(HttpStatus.OK);
         GrantSet gs = grantsResp.getBody();
         assertThat(gs).isNotNull();
-        assertThat(gs.permissions()).containsExactlyInAnyOrder(
-                "orders:create", "customers-web.tab.invoices", "customers-web.tab.orders");
+
+        // T1 (ADR-002): the template is a LAYOUT CATALOG — attaching it does NOT grant
+        // its elements' permissions. Only the explicitly granted key is in the grant set.
+        assertThat(gs.permissions()).containsExactly("orders:create");
 
         Scope scope = gs.scopes().get("orders");
         assertThat(scope).as("data scope for the 'orders' resource type").isNotNull();
         assertThat(scope.values("orgIds")).containsExactly(1, 2);
 
+        // T1: the UI bundle LISTS the template's elements, but both are hidden because
+        // their gating permissions were never granted (visible:false is reachable).
         UiElements ui = gs.ui().get("customers-web");
         assertThat(ui).as("UI bundle for the template's app").isNotNull();
         assertThat(ui.elements()).extracting(UiElements.Element::key, UiElements.Element::visible)
-                .contains(tuple("tab.invoices", true), tuple("tab.orders", true));
+                .contains(tuple("tab.invoices", false), tuple("tab.orders", false));
+
+        // T1 regression: granting the gating permission flips the element visible,
+        // and REVOKING it flips it back (previously the template re-granted it, so
+        // the revoke was a silent no-op — the #4 bug this fixes).
+        assertThat(post("/v1/admin/profiles/" + profile + "/permissions",
+                Map.of("key", "customers-web.tab.invoices"))).isEqualTo(200);
+        GrantSet gsGranted = rest.postForEntity("/v1/grants",
+                new HttpEntity<>(Map.of("userId", "u-1", "profiles", profiles), new HttpHeaders()), GrantSet.class).getBody();
+        assertThat(gsGranted.permissions()).contains("customers-web.tab.invoices");
+        assertThat(gsGranted.ui().get("customers-web").elements())
+                .extracting(UiElements.Element::key, UiElements.Element::visible)
+                .contains(tuple("tab.invoices", true), tuple("tab.orders", false));
+
+        assertThat(rest.exchange(
+                URI.create("/v1/admin/profiles/" + profile + "/permissions/customers-web.tab.invoices"),
+                HttpMethod.DELETE, new HttpEntity<>(actor()), Map.class)
+                .getStatusCode().value()).isEqualTo(200);
+        GrantSet gsRevoked = rest.postForEntity("/v1/grants",
+                new HttpEntity<>(Map.of("userId", "u-1", "profiles", profiles), new HttpHeaders()), GrantSet.class).getBody();
+        assertThat(gsRevoked.permissions()).doesNotContain("customers-web.tab.invoices");
+        assertThat(gsRevoked.ui().get("customers-web").elements())
+                .extracting(UiElements.Element::key, UiElements.Element::visible)
+                .as("revoking the gating permission hides the element again (revoke is effective)")
+                .contains(tuple("tab.invoices", false));
 
         // check: granted (allowed + grantedBy) and denied (no grant)
         CheckResult allowed = check("u-1", profiles, "orders:create");
@@ -282,8 +310,11 @@ class AccessServiceIntegrationTest {
         assertThat(json.readValue(message.getBody(), InvalidationEvent.class).version()).isEqualTo(before + 1);
 
         assertThat(jdbc.queryForObject(
-                "select count(*) from audit_change where entity_ref = ? and action = 'revoke_permission'",
-                Integer.class, profile)).isEqualTo(1);
+                "select count(*) from audit_change where entity_ref = ? and action = 'revoke_permission'"
+                        + " and detail::text like ?",
+                Integer.class, profile, "%orders:create%"))
+                .as("the orders:create revocation is audited (distinct from the T1 UI-perm revoke above)")
+                .isEqualTo(1);
 
         // The PDP recomputes (the cached GrantSet is stale by version) -> the
         // permission is no longer served.

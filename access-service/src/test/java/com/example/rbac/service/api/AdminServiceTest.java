@@ -8,6 +8,7 @@ import com.example.rbac.service.domain.ProfileScope;
 import com.example.rbac.service.domain.ProfileScopeRepository;
 import com.example.rbac.service.domain.ResourceType;
 import com.example.rbac.service.domain.ResourceTypeRepository;
+import com.example.rbac.service.domain.Template;
 import com.example.rbac.service.domain.TemplateRepository;
 import com.example.rbac.service.invalidation.OutboxService;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -50,6 +51,7 @@ class AdminServiceTest {
     private ProfileRepository profiles;
     private ResourceTypeRepository resourceTypes;
     private ProfileScopeRepository scopes;
+    private TemplateRepository templates;
     private AdminService service;
     private final ObjectMapper json = new ObjectMapper();
 
@@ -61,10 +63,11 @@ class AdminServiceTest {
         profiles = mock(ProfileRepository.class);
         resourceTypes = mock(ResourceTypeRepository.class);
         scopes = mock(ProfileScopeRepository.class);
+        templates = mock(TemplateRepository.class);
         service = new AdminService(profiles,
                 mock(PermissionRepository.class),
                 resourceTypes, scopes,
-                mock(TemplateRepository.class),
+                templates,
                 mock(ApplicationEventPublisher.class),
                 new OutboxService(null) {
                     @Override
@@ -152,5 +155,49 @@ class AdminServiceTest {
 
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
         verify(resourceTypes, never()).save(any(ResourceType.class));
+    }
+
+    // --- T1 (ADR-002): detachTemplate — the catalog counterpart of attach ---
+
+    @Test
+    void detachTemplate_removesTheTemplateFromTheProfile() {
+        when(profiles.findByName("support")).thenReturn(Optional.of(p));
+        Template standard = new Template("customers-web", "standard");
+        when(templates.findByAppIdAndName("customers-web", "standard"))
+                .thenReturn(Optional.of(standard));
+        p.getTemplates().add(standard);
+
+        service.detachTemplate("alice", "support", "customers-web", "standard");
+
+        assertEquals(0, p.getTemplates().size());
+        verify(profiles).save(p);
+    }
+
+    @Test
+    void detachTemplate_isIdempotent_whenNotAttached() {
+        when(profiles.findByName("support")).thenReturn(Optional.of(p));
+        Template standard = new Template("customers-web", "standard");
+        when(templates.findByAppIdAndName("customers-web", "standard"))
+                .thenReturn(Optional.of(standard));
+        p.getTemplates().add(new Template("customers-web", "other"));
+
+        service.detachTemplate("alice", "support", "customers-web", "standard");
+
+        // still attached (we detached a different one) — and no save (no-op)
+        assertEquals(1, p.getTemplates().size());
+        verify(profiles, never()).save(any(Profile.class));
+    }
+
+    @Test
+    void detachTemplate_requiresTheTemplateToExist() {
+        when(profiles.findByName("support")).thenReturn(Optional.of(p));
+        when(templates.findByAppIdAndName("customers-web", "ghost"))
+                .thenReturn(Optional.empty());
+
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> service.detachTemplate("alice", "support", "customers-web", "ghost"));
+
+        assertEquals("Template not found: customers-web/ghost", ex.getMessage());
+        verify(profiles, never()).save(any(Profile.class));
     }
 }

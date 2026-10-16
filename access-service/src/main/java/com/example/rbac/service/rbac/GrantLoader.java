@@ -67,7 +67,11 @@ public class GrantLoader {
         for (Template t : p.getTemplates()) {
             for (TemplateElement e : t.getElements()) {
                 Permission perm = e.getPermission();
-                permKeys.add(perm.getKey());
+                // T1 (ADR-002): a template is a LAYOUT CATALOG — attaching it does NOT grant
+                // the element's permission. It only contributes the UiElementDef (app,
+                // elementKey, gating-permission). Visibility stays permission-driven in
+                // RbacResolver, so `visible:false` is reachable and revoking the permission
+                // is effective.
                 ui.add(new UiElementDef(t.getAppId(), e.getElementKey(), perm.getKey()));
             }
         }

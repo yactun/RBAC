@@ -150,6 +150,28 @@ public class AdminService {
         publishInvalidation();
     }
 
+    /**
+     * T1 (ADR-002): remove a template from a profile. The template is a LAYOUT
+     * CATALOG — detaching removes its elements from the profile's UI bundles. It
+     * never had (or removes) any permission grant: those are independent
+     * ({@link #revokePermission}). Idempotent: detaching a non-attached template
+     * is a no-op (still audited + invalidated, matching {@link #revokePermission}).
+     */
+    @Transactional
+    public void detachTemplate(String actor, String profileName, String appId, String templateName) {
+        Profile p = requireProfile(profileName);
+        Template t = templates.findByAppIdAndName(appId, templateName)
+                .orElseThrow(() -> new IllegalStateException("Template not found: " + appId + "/" + templateName));
+        boolean removed = p.getTemplates().remove(t);
+        if (removed) {
+            p.touch();
+            profiles.save(p);
+        }
+        audit.change(actor, "profile", profileName, "detach_template",
+                "{\"app\":\"" + appId + "\",\"template\":\"" + templateName + "\"}");
+        publishInvalidation();
+    }
+
     @Transactional
     public ResourceType registerResourceType(String actor, String name, String ownerService,
                                              Map<String, Object> dimensionSchema) {

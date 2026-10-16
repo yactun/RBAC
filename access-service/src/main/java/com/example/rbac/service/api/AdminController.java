@@ -68,6 +68,15 @@ public class AdminController {
         return Map.of("status", "attached");
     }
 
+    @DeleteMapping("/profiles/{name}/templates/{appId}/{templateName}")
+    public Map<String, String> detachTemplate(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+                                              @PathVariable String name,
+                                              @PathVariable String appId,
+                                              @PathVariable String templateName) {
+        admin.detachTemplate(actor, name, appId, templateName);
+        return Map.of("status", "detached");
+    }
+
     @PostMapping("/resource-types")
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> registerResourceType(
