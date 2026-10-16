@@ -93,8 +93,11 @@ POST /v1/grants
 → 200 {
   "permissions": ["orders:create","orders:read","customers-web.tab.invoices","customers-web.tab.orders"],
   "scopes": {
-    "orders":   {"resourceType":"orders",   "filters":{"orgIds":[1,2,3],"regions":["EU"]}},
-    "invoices": {"resourceType":"invoices", "filters":{"orgIds":[1,2,3]}}
+    "orders":   {"resourceType":"orders",   "filters":[
+                    {"dimension":"orgIds","op":"IN","values":[1,2,3]},
+                    {"dimension":"regions","op":"IN","values":["EU"]}]},
+    "invoices": {"resourceType":"invoices", "filters":[
+                    {"dimension":"orgIds","op":"IN","values":[1,2,3]}]}
   },
   "ui": { "customers-web": {
             "app":"customers-web",
@@ -110,6 +113,8 @@ POST /v1/grants
 Notes:
 - This is the **single cached unit** (`GrantSet`, ADR D9). The client derives `check` / `scope` / `ui` **locally** from it — there is no separate `/scope` or `/ui` endpoint.
 - `version` is a monotonically increasing service-wide policy version. Clients compare it to detect stale local cache cheaply (§7).
+- **T1 (ADR-002):** a template is a *layout catalog* — `permissions` contains a template-element key (e.g. `customers-web.tab.invoices`) **only if it was granted explicitly**; attaching the template never grants it. The `ui` bundle lists the element either way, with `visible` driven by the permission (`tab.payments` above is listed but hidden because its gating permission is not granted).
+- **S2 (ADR-002):** scopes are canonical **Option A** filters — `{dimension, op, values}` with a closed op set `IN/EQ/GT/GTE/LT/LTE/BETWEEN/ALL`, AND across dimensions. `IN []` = deny (no rows); `ALL` = explicit all-rows; a missing dimension is an error, never "all rows".
 
 ### 4.3 Admin (all writes are audited, §8; every one bumps the version and publishes invalidation **after commit**)
 
@@ -119,11 +124,15 @@ All admin endpoints take an `X-Actor` header (the admin identity, recorded in th
 POST   /v1/admin/profiles                             { "name":"finance", "description":"..." }
 POST   /v1/admin/profiles/{name}/permissions          { "key":"orders:create" }
 DELETE /v1/admin/profiles/{name}/permissions/{key}
-PUT    /v1/admin/profiles/{name}/scopes/{resourceType}{ "orgIds":[1,2,3], "regions":["EU"] }
+PUT    /v1/admin/profiles/{name}/scopes/{resourceType}
+         [ {"dimension":"orgIds","op":"IN","values":[1,2,3]},
+           {"dimension":"regions","op":"IN","values":["EU"]} ]
+DELETE /v1/admin/profiles/{name}/scopes/{resourceType}
 
 POST   /v1/admin/templates                            { "appId":"customers-web", "name":"standard",
                                                         "elements":["customers-web.tab.invoices","customers-web.tab.orders"] }
 POST   /v1/admin/profiles/{name}/templates            { "appId":"customers-web", "name":"standard" }
+DELETE /v1/admin/profiles/{name}/templates/{appId}/{name}
 POST   /v1/admin/resource-types                       { "name":"orders", "ownerService":"orders-svc",
                                                         "dimensionSchema":{"orgIds":{"type":"list","item":"string"},
                                                                             "regions":{"type":"list","item":"string"}} }
@@ -131,9 +140,14 @@ POST   /v1/admin/resource-types                       { "name":"orders", "ownerS
 
 > Introspection / ops (on the decision controller, not admin): `GET /v1/version` → `{ "version": 123 }`.
 >
-> `PUT .../scopes/{resourceType}` validates its body: dimension keys must exactly match the
-> resource type's `dimensionSchema` (400 otherwise) — the scope-merge contract enforced at
-> authoring. `POST /v1/admin/resource-types` requires a non-empty `dimensionSchema`.
+> `PUT .../scopes/{resourceType}` (S2, ADR-002) takes the canonical **Option A** filter list
+> and validates it: dimensions must exactly match the resource type's `dimensionSchema`
+> (400 otherwise — the scope-merge contract), each op must be allowed by that dimension's
+> schema (`ops`, default `[IN, ALL]`), and arity per op is enforced (`IN` any / `EQ`,`GT`,
+> `GTE`,`LT`,`LTE` one / `BETWEEN` two / `ALL` zero). `DELETE .../scopes/{resourceType}`
+> is the explicit scope revocation. `POST /v1/admin/resource-types` requires a
+> non-empty `dimensionSchema`. `DELETE .../templates/...` detaches a template (T1: it
+> never had — or removes — any permission grant).
 
 ---
 
@@ -145,18 +159,18 @@ POST   /v1/admin/resource-types                       { "name":"orders", "ownerS
 - **Permission** — a namespaced key: `<area>:<action>` for service features (`orders:create`) or `<area>.<element>` for UI (`customers-web.tab.invoices`). Central catalog so keys are defined once and referenced.
 - **ResourceType** — a data domain owned by one service, with a **dimension schema** (the allowed filter keys). Registered by the owning service.
 - **ProfileScope** — for one profile + one resourceType, the granted dimension values (JSONB).
-- **Template** — a named bundle of UI elements for one app; each element is gated by a permission key.
-- **ProfileTemplate** — profile grants the whole template (→ inherits all its element permissions).
+- **Template** — a named *layout catalog* of UI elements for one app; each element is gated by a permission key (T1, ADR-002: attaching it does **not** grant those permissions — visibility is permission-driven, so revoke works).
+- **ProfileTemplate** — the profile sees the template's elements in its UI bundles (gated by their permissions, which must be granted independently).
 - **Assignment (user ↔ profile)** — lives in the **IDM**, not here (per A1).
 
 ### 5.2 Effective-grant resolution
 
 For a profile set `P`:
 
-- `permissions(P) = ⋃ over p∈P of ( profile_permission(p) ∪ ⋃ over templates(p) of template_element → permission )`
-- `scopes(P, R)   = merge( ⋃ over p∈P of profile_scope(p, R).dimensions )` — **union/OR** on each dimension list.
-  > **Contract:** this only *widens* access when **every** profile scoping `R` declares the **same dimension set**. If profiles use different dimensions (e.g. A={`orgIds`}, B={`regions`}), the client applies the merged scope as an AND across dimensions and it can *shrink* access — so authoring requires a shared dimension set per resource type (a list-of-alternative-scopes OR-model is the future alternative). Enforced: `setScope` rejects dimensions whose keys differ from `resource_type.dimension_schema` (400).
-- `ui(P, app)     = for each element e of each template of P with e.appId = app: visible = (e.permission ∈ permissions(P))`
+- `permissions(P) = ⋃ over p∈P of profile_permission(p)` — explicit grants only (T1, ADR-002: template elements are a catalog, never self-granted)
+- `scopes(P, R)   = OR-merge over p∈P of profile_scope(p, R).filters` — per dimension, the union of the allowed sets (Option A, ADR-002 S2): `IN` values union; `EQ`∪`EQ` = `EQ`/`IN`; `GT`/`GTE` = lowest bound; `LT`/`LTE` = highest bound; `BETWEEN` = covering interval; `ALL` wins; mixed ops on one dimension **fail closed** (refused, never guessed).
+  > **Contract:** this only *widens* access when **every** profile scoping `R` declares the **same dimension set**. If profiles use different dimensions (e.g. A={`orgIds`}, B={`regions`}), the client applies the merged scope as an AND across dimensions and it can *shrink* access — so authoring requires a shared dimension set per resource type (a list-of-alternative-scopes OR-model is the future alternative). Enforced: `setScope` rejects a dimension set / op / arity that differs from `resource_type.dimension_schema` (400).
+- `ui(P, app)     = for each element e of each template of P with e.appId = app: visible = (e.permission ∈ permissions(P))` — `visible:false` is reachable (T1)
 
 ### 5.3 PostgreSQL schema (v1)
 
@@ -186,14 +200,14 @@ create table resource_type (
   id               uuid primary key default gen_random_uuid(),
   name             text unique not null,      -- "orders"
   owner_service    text not null,
-  dimension_schema jsonb not null             -- {orgIds:{type:list,item:string}, ...}
+  dimension_schema jsonb not null             -- {orgIds:{type:list,item:string,ops:[IN,ALL]}, ...}
 );
 
 create table profile_scope (
   id               uuid primary key default gen_random_uuid(),
   profile_id       uuid not null references profile(id),
   resource_type_id uuid not null references resource_type(id),
-  dimensions       jsonb not null,            -- {"orgIds":[1,2,3],"regions":["EU"]}
+  dimensions       jsonb not null,            -- Option A filters: [{"dimension":"orgIds","op":"IN","values":[1,2,3]}, ...]
   unique (profile_id, resource_type_id)
 );
 
@@ -296,7 +310,7 @@ class OrdersController {
 }
 ```
 
-**Example integration — apply a data scope to a query:**
+**Example integration — apply a data scope to a query** (S2, ADR-002 — Option A filters):
 
 ```java
 @Service
@@ -306,16 +320,30 @@ class OrderQuery {
 
     public Page<Order> list(UserContext user, Pageable page) {
         Scope s = access.scope(user, "orders");          // throws AccessDeniedException (403) if no scope
-        List<String> orgIds  = s.values("orgIds");
-        List<String> regions = s.values("regions");
-        BooleanBuilder b = new BooleanBuilder();
-        if (!orgIds.isEmpty())  b.and(order.orgId.in(orgIds));
-        if (!regions.isEmpty()) b.and(order.region.in(regions));
-        // b is AND-ed into the repository query — the filter never leaves the service
-        return repo.findAll(b, page);
+        BooleanBuilder b = new BooleanBuilder(true);
+        for (Scope.Filter f : s.filters()) {             // dimensions are AND-ed
+            switch (f.op()) {
+                case ALL   -> { /* explicit all-rows: no condition for this dimension */ }
+                case IN    -> {
+                    if (f.values().isEmpty()) return Page.empty();  // IN [] = DENY — never drop the filter
+                    b.and(in(f.dimension(), f.values()));           // e.g. order.orgId.in(...)
+                }
+                case EQ    -> b.and(eq(f.dimension(), f.single()));
+                case GTE   -> b.and(gte(f.dimension(), f.single()));
+                case BETWEEN -> b.and(between(f.dimension(), f.low(), f.high()));
+                // GT / LT / LTE analogous
+            }
+        }
+        return repo.findAll(b, page);                    // the filter never leaves the service
     }
 }
 ```
+
+> **Fail-closed (S2):** the old `if (!orgIds.isEmpty()) b.and(...)` pattern is retired — a missing or
+> misspelled dimension now **throws** `UnknownDimensionException` (500, never an unscoped query), and
+> "all rows" must be explicit (`ALL`). `s.values("orgIds")` remains as the `IN` convenience.
+> The developer owns mapping each filter onto its ORM/SQL; the starter validates the PDP response
+> shape at deserialization so a corrupt payload never reaches a query.
 
 **Example integration — front-end visibility:**
 

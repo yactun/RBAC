@@ -1,5 +1,6 @@
 package com.example.rbac.service.rbac;
 
+import com.example.rbac.model.dto.Scope;
 import com.example.rbac.service.domain.Permission;
 import com.example.rbac.service.domain.Profile;
 import com.example.rbac.service.domain.ProfileRepository;
@@ -28,7 +29,13 @@ import java.util.stream.Collectors;
 @Component
 public class GrantLoader {
 
-    private static final TypeReference<Map<String, Object>> DIMS = new TypeReference<>() {
+    /**
+     * S2 (ADR-002): the stored dimensions JSON is now the canonical Option A filter
+     * list. Deserializing through the record constructors also validates the shape
+     * (op arity, non-blank dimensions) — a corrupt row fails closed at compute time
+     * (500, never cached) instead of serving a half-parsed scope.
+     */
+    private static final TypeReference<List<Scope.Filter>> FILTERS = new TypeReference<>() {
     };
 
     private final ProfileRepository profiles;
@@ -76,7 +83,7 @@ public class GrantLoader {
             }
         }
 
-        Map<String, Map<String, Object>> scopeMap = new LinkedHashMap<>();
+        Map<String, List<Scope.Filter>> scopeMap = new LinkedHashMap<>();
         for (ProfileScope s : profileScopes) {
             scopeMap.put(s.getResourceType().getName(), parse(s.getDimensions()));
         }
@@ -84,12 +91,12 @@ public class GrantLoader {
         return new ProfileGrants(p.getName(), permKeys, scopeMap, ui);
     }
 
-    private Map<String, Object> parse(String dimensionsJson) {
+    private List<Scope.Filter> parse(String dimensionsJson) {
         if (dimensionsJson == null || dimensionsJson.isBlank()) {
-            return Map.of();
+            return List.of();
         }
         try {
-            return json.readValue(dimensionsJson, DIMS);
+            return json.readValue(dimensionsJson, FILTERS);
         } catch (Exception e) {
             throw new IllegalStateException("Invalid dimensions JSON on profile scope: " + dimensionsJson, e);
         }

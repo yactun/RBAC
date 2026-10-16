@@ -224,8 +224,9 @@ class AccessServiceIntegrationTest {
                 "ownerService", "orders-svc",
                 "dimensionSchema", Map.of("orgIds", Map.of("type", "list", "item", "string")))))
                 .isEqualTo(201);
-        assertThat(put("/v1/admin/profiles/" + profile + "/scopes/orders", Map.of("orgIds", List.of(1, 2))))
-                .isEqualTo(200);
+        // S2 (ADR-002): canonical Option A filter list (typed predicates)
+        assertThat(put("/v1/admin/profiles/" + profile + "/scopes/orders",
+                List.of(Map.of("dimension", "orgIds", "op", "IN", "values", List.of(1, 2))))).isEqualTo(200);
         assertThat(post("/v1/admin/templates", Map.of(
                 "appId", "customers-web",
                 "name", "standard",

@@ -326,14 +326,18 @@ Decision (called by clients / SDK):
 Admin (audited authoring; every one bumps version + publishes invalidation **after commit**):
 - `POST   /v1/admin/profiles`
 - `POST   /v1/admin/profiles/{name}/permissions`  ·  `DELETE .../permissions/{key}`
-- `PUT    /v1/admin/profiles/{name}/scopes/{resourceType}`
+- `PUT    /v1/admin/profiles/{name}/scopes/{resourceType}` — body = Option A filter list
+- `DELETE /v1/admin/profiles/{name}/scopes/{resourceType}` — explicit scope revocation (ADR-002 S2)
 - `POST   /v1/admin/templates`  ·  `POST /v1/admin/profiles/{name}/templates`
+- `DELETE /v1/admin/profiles/{name}/templates/{appId}/{name}` — detach (ADR-002 T1)
 - `POST   /v1/admin/resource-types`
 
 Client codes against `AccessClient` (starter), **not** the raw REST endpoints:
 ```java
 accessClient.has(user, "orders:refund");                 // feature gate
-Scope s = accessClient.scope(user, "orders");            // s.values("orgIds") -> List
+Scope s = accessClient.scope(user, "orders");            // Option A filters (ADR-002 S2)
+for (Scope.Filter f : s.filters()) { /* apply per op: IN/EQ/GT/GTE/LT/LTE/BETWEEN/ALL */ }
+// convenience: s.values("orgIds") (IN only; throws on unknown dim), s.isAll("regions")
 UiElements ui = accessClient.ui(user, "customers-web");  // which tabs are visible
 ```
 
@@ -351,8 +355,11 @@ permission) · `profile_template` (M2M).
 placeholder `*_2026_10` partitions + the runbook note in V2).
 
 > Note: `profile_scope.dimensions` is JSONB and **service-defined** — each
-> microservice declares its own dimensions via `resource_type.dimension_schema`.
-> The PDP does not interpret them; it only returns them to the owning service.
+> microservice declares its own dimensions via `resource_type.dimension_schema`
+> (which may also allow-list ops per dimension: `"ops":["IN","ALL"]`).
+> Since ADR-002 S2 it stores the canonical **Option A filter list**
+> (`[{"dimension":"orgIds","op":"IN","values":[1,2]}, …]`); the PDP does not
+> interpret the values — it returns them to the owning service, which applies them.
 
 ---
 
@@ -424,12 +431,16 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     queue** (`QueueBuilder.nonDurable(name).autoDelete()`) to the durable topic exchange
     `Bus.EXCHANGE`. A single shared durable queue would be consumed competitively, and each
     event would reach only one replica.
-14. **Scope-merge contract** — the per-dimension union only *widens* when every profile
-    scoping a resource type declares the **same dimension set**; cross-dimension merges
-    apply as an AND and can *shrink* access (documented in `RbacResolver` Javadoc, pinned by
-    a test, and stated in ADR-001 under the assumptions). Enforced at authoring: `setScope`
-    rejects dimensions that don't exactly match `resource_type.dimension_schema` (400);
-    `registerResourceType` requires a non-empty schema.
+14. **Scope-merge contract (Option A, ADR-002 S2)** — per dimension, profiles' filters are
+    **OR-merged** (union of allowed sets: `IN` values union; `EQ`∪`EQ`=`EQ`/`IN`;
+    `GT`/`GTE`=lowest bound; `LT`/`LTE`=highest; `BETWEEN`=covering interval; `ALL` wins);
+    **mixed ops on one dimension fail closed** (throw at resolve — a loud 500, never cached).
+    Cross-dimension merges apply as an AND and can *shrink* access — so authoring requires a
+    shared dimension set per resource type (documented in `RbacResolver` Javadoc, pinned by
+    tests, stated in ADR-001). Enforced at authoring: `setScope` rejects a dimension set, an
+    op not allowed by the dimension's schema (`ops`, default `[IN, ALL]`), a duplicate
+    dimension, or wrong arity (`IN` any / `EQ,GT,GTE,LT,LTE` one / `BETWEEN` two / `ALL` zero)
+    — all 400; `registerResourceType` requires a non-empty schema.
 15. **`setScope` upserts in place** — it must UPDATE the existing `profile_scope` row
     (mutate the managed entity), never delete+insert: Hibernate flushes INSERTs before
     DELETEs, so a fresh insert would violate `unique (profile_id, resource_type_id)`.
@@ -537,6 +548,26 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     template also removed the `redisTemplate` bean that Spring Data Redis's
     `redisReferenceResolver` needs → context fails to load. Keep the host auto-config active
     in the test and prove isolation by *identity*, not by absence.
+26. **The `Scope` wire format is Option A now (ADR-002 S2) — a deliberate, test-visible break.**
+    `Scope` is `{resourceType, filters:[{dimension, op, values}]}` with the closed op set
+    `IN/EQ/GT/GTE/LT/LTE/BETWEEN/ALL`. `IN []` = **deny** (not a wildcard); `ALL` = explicit
+    all-rows; `values(dim)`/`isAll(dim)` **throw** `UnknownDimensionException` for a missing
+    dimension (the old `[] = no filter = all rows` fail-open is gone). Op arity is enforced in
+    the record constructors, which also **validate at Jackson (de)serialization** — so a corrupt
+    PDP response or a stale L2 value fails closed (error, never a half-parsed scope) instead of
+    reaching a query. `profile_scope.dimensions` (jsonb) now stores the filter list; no
+    migration needed (service-defined blob). Old-format L2 entries written before the upgrade
+    self-heal: the client's L2 read error falls through to the PDP (C1) and the TTL/version
+    bump expires them. Do not reintroduce a map-shaped `filters` or a `values()` that returns
+    `List.of()` for an unknown dimension.
+27. **Templates are a catalog, not a grant-bundle (ADR-002 T1).** `GrantLoader` must NOT add
+    template-element permissions to `permissionKeys` — that was the #4 bug (it made
+    `visible:false` unreachable and revocation a silent no-op). Attach/detach
+    (`POST`/`DELETE /v1/admin/profiles/{name}/templates/...`) only move UI elements; the
+    element's permission is granted/revoked via the normal permission endpoints, and
+    `RbacResolver.computeUi` stays `visible = permissions.contains(gating)`. Pinned by
+    `RbacResolverTest` + the IT `decisionFlow` round-trip (attach → hidden; grant → visible;
+    revoke → hidden again).
 
 ---
 

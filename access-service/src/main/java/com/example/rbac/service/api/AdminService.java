@@ -1,5 +1,6 @@
 package com.example.rbac.service.api;
 
+import com.example.rbac.model.dto.Scope;
 import com.example.rbac.service.audit.AuditService;
 import com.example.rbac.service.domain.Permission;
 import com.example.rbac.service.domain.PermissionRepository;
@@ -23,6 +24,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -99,12 +102,17 @@ public class AdminService {
         publishInvalidation();
     }
 
+    /**
+     * S2 (ADR-002): set the profile's scope for a resource type as canonical Option A
+     * filters ({@code {dimension, op, values}}; op validated against the resource
+     * type's dimension schema; {@code IN []} = deny, {@code ALL} = all-rows).
+     */
     @Transactional
-    public void setScope(String actor, String profileName, String resourceTypeName, Map<String, Object> dimensions) {
+    public void setScope(String actor, String profileName, String resourceTypeName, List<Scope.Filter> filters) {
         Profile p = requireProfile(profileName);
         ResourceType rt = requireResourceType(resourceTypeName);
-        requireDimensionsMatchSchema(rt, dimensions);
-        String dimsJson = toJson(dimensions);
+        requireFiltersMatchSchema(rt, filters);
+        String dimsJson = toJson(filters);
         // Upsert: mutate the existing (managed) row in place → one UPDATE. Never
         // delete+insert: Hibernate flushes INSERTs before DELETEs, so a fresh
         // insert would violate unique (profile_id, resource_type_id).
@@ -114,8 +122,29 @@ public class AdminService {
         scopes.save(toSave);
         Map<String, Object> detail = new LinkedHashMap<>();
         detail.put("resourceType", resourceTypeName);
-        detail.put("dimensions", dimensions);
+        detail.put("filters", filters);
         audit.change(actor, "profile", profileName, "set_scope", toJson(detail));
+        publishInvalidation();
+    }
+
+    /**
+     * S2 (ADR-002): remove the profile's scope for a resource type entirely — the
+     * explicit revocation op (the old "set an empty dimension" trick is gone).
+     * Idempotent: still audited + invalidated when the scope is already absent
+     * (matching {@link #revokePermission}).
+     */
+    @Transactional
+    public void deleteScope(String actor, String profileName, String resourceTypeName) {
+        Profile p = requireProfile(profileName);
+        ResourceType rt = requireResourceType(resourceTypeName);
+        boolean removed = scopes.findByProfileIdAndResourceType_Id(p.getId(), rt.getId())
+                .map(row -> {
+                    scopes.delete(row);
+                    return true;
+                })
+                .orElse(false);
+        audit.change(actor, "profile", profileName, "delete_scope",
+                "{\"resourceType\":\"" + resourceTypeName + "\",\"existed\":" + removed + "}");
         publishInvalidation();
     }
 
@@ -219,24 +248,60 @@ public class AdminService {
     }
 
     /**
-     * Enforces the scope-merge contract at authoring time (ADR A3, DESIGN §5.2):
-     * every profile scoping a resource type must declare the SAME dimension set,
-     * otherwise the resolver's union degrades to an AND and can *shrink* access.
-     * The resource type's dimension_schema is the canonical set.
+     * Enforces the scope-merge contract at authoring time (ADR A3, ADR-002 S2,
+     * DESIGN §5.2): the filters must cover exactly the resource type's dimension
+     * set (otherwise the resolver's merge degrades and can *shrink* access), each
+     * dimension at most once, and each op must be allowed by the dimension schema
+     * (closed op set; unknown op = 400).
      */
-    private void requireDimensionsMatchSchema(ResourceType rt, Map<String, Object> dimensions) {
+    private void requireFiltersMatchSchema(ResourceType rt, List<Scope.Filter> filters) {
         Map<String, Object> schema = fromJson(rt.getDimensionSchema());
         if (schema == null || schema.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Resource type '" + rt.getName() + "' has no dimension schema; "
                             + "register one before setting scopes.");
         }
-        if (!schema.keySet().equals(dimensions.keySet())) {
+        if (filters == null || filters.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "filters must not be empty for resource type '" + rt.getName() + "': every dimension "
+                            + schema.keySet() + " must be declared (use op ALL for all-rows, IN [] for deny).");
+        }
+        Set<String> dims = new LinkedHashSet<>();
+        for (Scope.Filter f : filters) {
+            if (f == null || !dims.add(f.dimension())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "each dimension must appear at most once (got "
+                                + filters.stream().map(Scope.Filter::dimension).toList() + ")");
+            }
+        }
+        if (!schema.keySet().equals(dims)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Dimensions for resource type '" + rt.getName() + "' must be exactly "
-                            + schema.keySet() + " (got " + dimensions.keySet() + ") — profiles scoping "
+                            + schema.keySet() + " (got " + dims + ") — profiles scoping "
                             + "the same resource type must share the dimension set (scope-merge contract).");
         }
+        for (Scope.Filter f : filters) {
+            Set<String> allowed = allowedOps(schema.get(f.dimension()));
+            if (!allowed.contains(f.op().name())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "op " + f.op() + " is not allowed for dimension '" + f.dimension()
+                                + "' of resource type '" + rt.getName() + "' (allowed: " + allowed + ")");
+            }
+        }
+    }
+
+    /**
+     * The ops a dimension allows, per its schema entry: {@code {"ops":["IN","GTE"]}}.
+     * Legacy schemas without {@code ops} default to {@code [IN, ALL]} (the historical
+     * value-list shape).
+     */
+    private Set<String> allowedOps(Object dimensionSchema) {
+        if (dimensionSchema instanceof Map<?, ?> m && m.get("ops") instanceof List<?> ops && !ops.isEmpty()) {
+            Set<String> out = new LinkedHashSet<>();
+            ops.forEach(o -> out.add(String.valueOf(o)));
+            return out;
+        }
+        return Set.of("IN", "ALL");
     }
 
     private Map<String, Object> fromJson(String json) {

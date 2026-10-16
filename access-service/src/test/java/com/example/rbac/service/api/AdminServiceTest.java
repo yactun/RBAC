@@ -1,5 +1,6 @@
 package com.example.rbac.service.api;
 
+import com.example.rbac.model.dto.Scope;
 import com.example.rbac.service.audit.AuditService;
 import com.example.rbac.service.domain.PermissionRepository;
 import com.example.rbac.service.domain.Profile;
@@ -26,6 +27,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -92,20 +94,24 @@ class AdminServiceTest {
         when(resourceTypes.findByName("orders")).thenReturn(Optional.of(orders));
     }
 
+    private static Scope.Filter in(String dimension, Object... values) {
+        return new Scope.Filter(dimension, Scope.Op.IN, List.of(values));
+    }
+
     @Test
     void setScope_updatesExistingScopeInPlace_neverDeletes() throws Exception {
         givenOrdersType("{\"orgIds\":{\"type\":\"list\"},\"regions\":{\"type\":\"list\"}}");
-        ProfileScope existing = new ProfileScope(null, orders, "{\"orgIds\":[9]}");
+        ProfileScope existing = new ProfileScope(null, orders, "[]");
         when(scopes.findByProfileIdAndResourceType_Id(any(), any())).thenReturn(Optional.of(existing));
 
         service.setScope("alice", "support", "orders",
-                Map.of("orgIds", List.of(1, 2), "regions", List.of("EU")));
+                List.of(in("orgIds", 1, 2), in("regions", "EU")));
 
         verify(scopes, never()).delete(any(ProfileScope.class));   // ← the regression, pinned
-        Map<String, Object> stored = json.readValue(existing.getDimensions(),
-                new TypeReference<Map<String, Object>>() {});
-        assertEquals(List.of(1, 2), stored.get("orgIds"));
-        assertEquals(List.of("EU"), stored.get("regions"));
+        List<Scope.Filter> stored = json.readValue(existing.getDimensions(),
+                new TypeReference<List<Scope.Filter>>() {});
+        assertEquals(List.of(1, 2), stored.get(0).values());
+        assertEquals(List.of("EU"), stored.get(1).values());
         verify(scopes).save(existing);
     }
 
@@ -115,15 +121,15 @@ class AdminServiceTest {
         when(scopes.findByProfileIdAndResourceType_Id(any(), any())).thenReturn(Optional.empty());
 
         service.setScope("alice", "support", "orders",
-                Map.of("orgIds", List.of(1, 2), "regions", List.of("EU")));
+                List.of(in("orgIds", 1, 2), in("regions", "EU")));
 
         verify(scopes, never()).delete(any(ProfileScope.class));
         ArgumentCaptor<ProfileScope> saved = ArgumentCaptor.forClass(ProfileScope.class);
         verify(scopes).save(saved.capture());
-        Map<String, Object> stored = json.readValue(saved.getValue().getDimensions(),
-                new TypeReference<Map<String, Object>>() {});
-        assertEquals(List.of(1, 2), stored.get("orgIds"));
-        assertEquals(List.of("EU"), stored.get("regions"));
+        List<Scope.Filter> stored = json.readValue(saved.getValue().getDimensions(),
+                new TypeReference<List<Scope.Filter>>() {});
+        assertEquals(List.of(1, 2), stored.get(0).values());
+        assertEquals(List.of("EU"), stored.get(1).values());
     }
 
     @Test
@@ -131,7 +137,7 @@ class AdminServiceTest {
         givenOrdersType("{\"orgIds\":{\"type\":\"list\"},\"regions\":{\"type\":\"list\"}}");
 
         ResponseStatusException ex = assertThrows(ResponseStatusException.class,
-                () -> service.setScope("alice", "support", "orders", Map.of("orgIds", List.of(1))));
+                () -> service.setScope("alice", "support", "orders", List.of(in("orgIds", 1))));
 
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
         verify(scopes, never()).save(any(ProfileScope.class));
@@ -142,10 +148,72 @@ class AdminServiceTest {
         givenOrdersType(null);
 
         ResponseStatusException ex = assertThrows(ResponseStatusException.class,
-                () -> service.setScope("alice", "support", "orders", Map.of("orgIds", List.of(1))));
+                () -> service.setScope("alice", "support", "orders", List.of(in("orgIds", 1))));
 
         assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
         verify(scopes, never()).save(any(ProfileScope.class));
+    }
+
+    // --- S2 (ADR-002): Option A op validation + explicit scope deletion ---
+
+    @Test
+    void setScope_rejectsAnOpTheSchemaDoesNotAllow() {
+        givenOrdersType("{\"orgIds\":{\"ops\":[\"IN\",\"ALL\"]}}");
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> service.setScope("alice", "support", "orders",
+                        List.of(new Scope.Filter("orgIds", Scope.Op.GT, List.of(1)))));
+
+        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+        verify(scopes, never()).save(any(ProfileScope.class));
+    }
+
+    @Test
+    void setScope_rejectsADimensionTwice() {
+        givenOrdersType("{\"orgIds\":{\"type\":\"list\"}}");
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> service.setScope("alice", "support", "orders",
+                        List.of(in("orgIds", 1), in("orgIds", 2))));
+
+        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+        verify(scopes, never()).save(any(ProfileScope.class));
+    }
+
+    @Test
+    void setScope_allowsTheExplicitAllOp() throws Exception {
+        givenOrdersType("{\"orgIds\":{\"ops\":[\"IN\",\"ALL\"]}}");
+        ProfileScope existing = new ProfileScope(null, orders, "[]");
+        when(scopes.findByProfileIdAndResourceType_Id(any(), any())).thenReturn(Optional.of(existing));
+
+        service.setScope("alice", "support", "orders",
+                List.of(new Scope.Filter("orgIds", Scope.Op.ALL, List.of())));
+
+        List<Scope.Filter> stored = json.readValue(existing.getDimensions(),
+                new TypeReference<List<Scope.Filter>>() {});
+        assertEquals(Scope.Op.ALL, stored.get(0).op());
+        assertTrue(stored.get(0).values().isEmpty());
+    }
+
+    @Test
+    void deleteScope_removesTheScopeRow() {
+        givenOrdersType("{\"orgIds\":{\"type\":\"list\"}}");
+        ProfileScope existing = new ProfileScope(null, orders, "[]");
+        when(scopes.findByProfileIdAndResourceType_Id(any(), any())).thenReturn(Optional.of(existing));
+
+        service.deleteScope("alice", "support", "orders");
+
+        verify(scopes).delete(existing);
+    }
+
+    @Test
+    void deleteScope_isIdempotent_whenNoScopeExists() {
+        givenOrdersType("{\"orgIds\":{\"type\":\"list\"}}");
+        when(scopes.findByProfileIdAndResourceType_Id(any(), any())).thenReturn(Optional.empty());
+
+        service.deleteScope("alice", "support", "orders");
+
+        verify(scopes, never()).delete(any(ProfileScope.class));
     }
 
     @Test

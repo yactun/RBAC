@@ -3,6 +3,7 @@ package com.example.rbac.service.api;
 import com.example.rbac.model.UserContext;
 import com.example.rbac.model.dto.CheckResult;
 import com.example.rbac.model.dto.GrantSet;
+import com.example.rbac.model.dto.Scope;
 import com.example.rbac.service.audit.AuditService;
 import com.example.rbac.service.cache.GrantCache;
 import com.example.rbac.service.cache.VersionService;
@@ -45,7 +46,7 @@ class GrantServiceRedisDownTest {
 
         // What the loader would return from Postgres (healthy): the "ops" profile grants orders:create.
         ProfileGrants ops = new ProfileGrants("ops", Set.of("orders:create"),
-                Map.of("orders", Map.of("orgIds", List.of(1, 2))), List.of());
+                Map.of("orders", List.of(new Scope.Filter("orgIds", Scope.Op.IN, List.of(1, 2)))), List.of());
         when(loader.load(any())).thenReturn(List.of(ops));
 
         return new GrantService(cache, version, loader, audit, new SimpleMeterRegistry());

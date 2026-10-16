@@ -1,9 +1,11 @@
 package com.example.rbac.service.api;
 
+import com.example.rbac.model.dto.Scope;
 import com.example.rbac.service.invalidation.InvalidationRelay;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -45,12 +47,25 @@ public class AdminController {
         return Map.of("status", "revoked");
     }
 
+    /**
+     * S2 (ADR-002): the body is the canonical Option A filter list
+     * ({@code [{dimension, op, values}, …]}); ops are validated against the
+     * resource type's dimension schema (400 on an unknown op/dimension).
+     */
     @PutMapping("/profiles/{name}/scopes/{resourceType}")
     public Map<String, String> setScope(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
                                         @PathVariable String name, @PathVariable String resourceType,
-                                        @RequestBody Map<String, Object> dimensions) {
-        admin.setScope(actor, name, resourceType, dimensions);
+                                        @RequestBody List<Scope.Filter> filters) {
+        admin.setScope(actor, name, resourceType, filters);
         return Map.of("status", "set");
+    }
+
+    /** S2 (ADR-002): explicit scope revocation (remove the whole scope for the resource type). */
+    @DeleteMapping("/profiles/{name}/scopes/{resourceType}")
+    public Map<String, String> deleteScope(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+                                           @PathVariable String name, @PathVariable String resourceType) {
+        admin.deleteScope(actor, name, resourceType);
+        return Map.of("status", "deleted");
     }
 
     @PostMapping("/templates")
