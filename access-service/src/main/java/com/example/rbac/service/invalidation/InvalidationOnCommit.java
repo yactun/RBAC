@@ -1,60 +1,34 @@
 package com.example.rbac.service.invalidation;
 
-import com.example.rbac.model.dto.InvalidationEvent;
-import com.example.rbac.service.cache.VersionService;
-import io.micrometer.core.instrument.MeterRegistry;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 
 /**
- * Performs the version bump + invalidation publish only AFTER the admin
- * transaction commits.
+ * Fires the fast path: right AFTER the admin transaction commits, process the outbox
+ * row (bump the version + publish the invalidation), so the healthy case stays
+ * near-instant.
  *
- * <p>The old behavior published <i>inside</i> the transaction. A client that
- * refetched in the small gap between publish and commit would read the not-yet
- * committed (old) grants, stamped with the already-bumped version, and cache them
- * as fresh for the whole TTL — exactly the silent revocation loss D10 is meant to
- * prevent. Deferring to {@code AFTER_COMMIT} fixes the ordering to
- * commit → bump → publish.
+ * <p>Deferring to {@code AFTER_COMMIT} keeps the ordering commit → bump → publish, so a
+ * client refetching in the small gap can never read not-yet-committed grants stamped
+ * with an already-bumped version (the silent revocation loss D10 is meant to prevent).
  *
- * <p>If Redis or RabbitMQ is unavailable at that moment the invalidation is
- * LOST (the change is already committed): it is logged at ERROR and clients
- * degrade to TTL-bounded staleness — the documented safety net, never a wrong
- * decision. The change itself is never reported as failed. The durable
- * long-term fix is a transactional outbox (the relay performs the bump +
- * publish, so both ride on the committed intent).
+ * <p>This is BEST-EFFORT: if Redis or RabbitMQ is down at that moment,
+ * {@link InvalidationRelay#process(long)} leaves the outbox row unpublished and the
+ * relay re-drives it. The change is COMMITTED and the invalidation is OWED — never lost,
+ * never reported as a failure.
  */
 @Component
 public class InvalidationOnCommit {
 
-    private static final Logger log = LoggerFactory.getLogger(InvalidationOnCommit.class);
+    private final InvalidationRelay relay;
 
-    private final VersionService version;
-    private final InvalidationPublisher publisher;
-    private final MeterRegistry metrics;
-
-    public InvalidationOnCommit(VersionService version, InvalidationPublisher publisher, MeterRegistry metrics) {
-        this.version = version;
-        this.publisher = publisher;
-        this.metrics = metrics;
+    public InvalidationOnCommit(InvalidationRelay relay) {
+        this.relay = relay;
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
     public void onCommit(GrantChangeEvent event) {
-        try {
-            long v = version.bump();
-            publisher.publish(InvalidationEvent.all(v));
-            metrics.counter("rbac.pdp.invalidation.published").increment();
-        } catch (RuntimeException e) {
-            metrics.counter("rbac.pdp.invalidation.lost").increment();
-            // The change is COMMITTED — a 500 here would be a lie. Log loudly so
-            // ops can re-trigger; clients degrade to TTL-bounded staleness (D10).
-            log.error("Grant change committed but invalidation was NOT published; "
-                    + "clients stay stale until TTL expiry. Re-run the admin change or "
-                    + "bump the policy version manually. cause={}", e.toString());
-        }
+        relay.process(event.outboxId());
     }
 }

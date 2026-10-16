@@ -1,5 +1,6 @@
 package com.example.rbac.service.api;
 
+import com.example.rbac.service.invalidation.InvalidationRelay;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,9 +16,11 @@ import java.util.Set;
 public class AdminController {
 
     private final AdminService admin;
+    private final InvalidationRelay relay;
 
-    public AdminController(AdminService admin) {
+    public AdminController(AdminService admin, InvalidationRelay relay) {
         this.admin = admin;
+        this.relay = relay;
     }
 
     @PostMapping("/profiles")
@@ -72,6 +75,17 @@ public class AdminController {
             @RequestBody ResourceTypeBody body) {
         var rt = admin.registerResourceType(actor, body.name(), body.ownerService(), body.dimensionSchema());
         return Map.of("name", rt.getName(), "ownerService", String.valueOf(rt.getOwnerService()));
+    }
+
+    /**
+     * Ops escape hatch (REVIEW #9): force an immediate global version bump +
+     * invalidation publish, bypassing the outbox. Use to unstick clients if the relay
+     * appears stuck (e.g. the {@code rbac.pdp.outbox.pending} gauge is climbing).
+     */
+    @PostMapping("/invalidate")
+    public Map<String, Object> invalidate() {
+        long version = relay.forceInvalidate();
+        return Map.of("version", version);
     }
 
     // --- request bodies ---

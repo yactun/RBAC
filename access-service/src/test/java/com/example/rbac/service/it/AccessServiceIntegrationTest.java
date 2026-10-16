@@ -9,6 +9,7 @@ import com.example.rbac.model.dto.Scope;
 import com.example.rbac.model.dto.UiElements;
 import com.example.rbac.service.cache.GrantCache;
 import com.example.rbac.service.cache.VersionService;
+import com.example.rbac.service.invalidation.OutboxService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -34,6 +35,8 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.RabbitMQContainer;
@@ -96,6 +99,7 @@ class AccessServiceIntegrationTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired ObjectMapper json;
     @Autowired MeterRegistry registry;
+    @Autowired OutboxService outbox;
 
     // --- startup against live infrastructure ---
 
@@ -103,7 +107,7 @@ class AccessServiceIntegrationTest {
     void contextBoots_flywayApplied_auditPartitioned_redisAndBusReachable() {
         Integer applied = jdbc.queryForObject(
                 "select count(*) from flyway_schema_history where success", Integer.class);
-        assertThat(applied).as("Flyway applied V1 + V2 on the real PostgreSQL").isGreaterThanOrEqualTo(2);
+        assertThat(applied).as("Flyway applied V1 + V2 + V3 on the real PostgreSQL").isGreaterThanOrEqualTo(3);
 
         Integer auditTables = jdbc.queryForObject(
                 "select count(*) from pg_class where relname like 'audit_decision%'", Integer.class);
@@ -141,6 +145,66 @@ class AccessServiceIntegrationTest {
                 "select count(*) from audit_change where entity_ref = ? and action = 'create'",
                 Integer.class, profile);
         assertThat(changeAudits).as("synchronous change audit row").isEqualTo(1);
+
+        // C6 outbox: the committed change wrote an invalidation intent in-txn, and the
+        // fast path (after commit) published it — so nothing is left pending.
+        Integer outboxPending = jdbc.queryForObject(
+                "select count(*) from outbox_invalidation where published_at is null", Integer.class);
+        assertThat(outboxPending).as("no outbox row left pending after the fast path").isEqualTo(0);
+        Integer outboxPublished = jdbc.queryForObject(
+                "select count(*) from outbox_invalidation where published_at is not null", Integer.class);
+        assertThat(outboxPublished).as("the committed change's invalidation intent was published")
+                .isGreaterThanOrEqualTo(1);
+    }
+
+    // --- C6 outbox: the durable fallback (relay) recovers a lost fast path ---
+
+    @Test
+    void relayRecoversPendingRow_andPublishesOnBus() throws Exception {
+        long before = versions.current();
+        Queue queue = standinClientQueue();
+
+        // Simulate a committed change whose fast path was lost (e.g. Redis/RabbitMQ was
+        // down at commit): the outbox row is committed but unpublished.
+        KeyHolder keys = new GeneratedKeyHolder();
+        jdbc.update(con -> con.prepareStatement(
+                "insert into outbox_invalidation default values", new String[]{"id"}), keys);
+        long id = keys.getKey().longValue();
+        assertThat(outbox.pending()).as("a pending invalidation intent exists").isGreaterThanOrEqualTo(1);
+
+        // The relay (1s poll) must recover it: claim, bump, publish, mark published.
+        Awaitility.await().atMost(Duration.ofSeconds(15)).until(() -> outbox.pending() == 0L);
+
+        Integer published = jdbc.queryForObject(
+                "select count(*) from outbox_invalidation where id = ? and published_at is not null",
+                Integer.class, id);
+        assertThat(published).as("the pending row was marked published by the relay").isEqualTo(1);
+        Long stamped = jdbc.queryForObject(
+                "select version from outbox_invalidation where id = ?", Long.class, id);
+        assertThat(stamped).as("stamped with a version newer than before").isGreaterThanOrEqualTo(before + 1);
+
+        Message message = rabbitTemplate.receive(queue.getName(), 5_000);
+        assertThat(message).as("the relay published an invalidation to the bus").isNotNull();
+        assertThat(json.readValue(message.getBody(), InvalidationEvent.class).version())
+                .as("the bus event carries a newer version").isGreaterThanOrEqualTo(before + 1);
+    }
+
+    @Test
+    void adminInvalidate_forcesBumpAndPublish_bypassingOutbox() throws Exception {
+        long before = versions.current();
+        Queue queue = standinClientQueue();
+
+        ResponseEntity<Map> resp =
+                rest.postForEntity("/v1/admin/invalidate", new HttpEntity<>(actor()), Map.class);
+        assertThat(resp.getStatusCode().value()).as("escape hatch succeeds").isEqualTo(200);
+        // The JSON round-trip hands back an Integer, so compare numerically (not by type).
+        assertThat(((Number) resp.getBody().get("version")).longValue())
+                .as("returns the new version").isEqualTo(before + 1);
+
+        Message message = rabbitTemplate.receive(queue.getName(), 5_000);
+        assertThat(message).as("force-invalidate published an event to the bus").isNotNull();
+        assertThat(json.readValue(message.getBody(), InvalidationEvent.class).version())
+                .isEqualTo(before + 1);
     }
 
     // --- full decision flow + revocation round-trip ---
@@ -253,9 +317,13 @@ class AccessServiceIntegrationTest {
         assertThat(l2Hit).as("L2 hit is recorded").isNotNull();
         assertThat(l2Hit.count()).isGreaterThanOrEqualTo(1);
 
-        Counter published = registry.get("rbac.pdp.invalidation.published").counter();
-        assertThat(published).as("invalidation publish counter is recorded").isNotNull();
+        // C6 outbox metrics: the publish counter is recorded and the pending gauge sits
+        // at 0 (the healthy fast path leaves nothing unpublished).
+        Counter published = registry.get("rbac.pdp.outbox.published").counter();
+        assertThat(published).as("outbox publish counter is recorded").isNotNull();
         assertThat(published.count()).isGreaterThanOrEqualTo(1);
+        Double pending = registry.get("rbac.pdp.outbox.pending").gauge().value();
+        assertThat(pending).as("no outbox row left pending (fast path published it)").isEqualTo(0.0);
 
         // Backend: OpenTelemetry (CNCF standard) — the OTLP registry is a runtime
         // dependency. Boot wires it whenever metrics export is enabled; Boot's test

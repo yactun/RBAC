@@ -9,6 +9,7 @@ import com.example.rbac.service.domain.ProfileScopeRepository;
 import com.example.rbac.service.domain.ResourceType;
 import com.example.rbac.service.domain.ResourceTypeRepository;
 import com.example.rbac.service.domain.TemplateRepository;
+import com.example.rbac.service.invalidation.OutboxService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -65,6 +66,13 @@ class AdminServiceTest {
                 resourceTypes, scopes,
                 mock(TemplateRepository.class),
                 mock(ApplicationEventPublisher.class),
+                new OutboxService(null) {
+                    @Override
+                    public long append() {
+                        // no real DB in this unit test; the id is irrelevant here
+                        return 42L;
+                    }
+                },
                 new AuditService(null) {
                     @Override
                     public void change(String actor, String entity, String entityRef,

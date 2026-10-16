@@ -41,10 +41,30 @@
   `mvn clean verify` → **BUILD SUCCESS** (access-service 18 tests, starter 11; total 29).
 - **Next (per `REVIEW-implementation-vs-design.md` §4):** team answers ADR-002 §7 → implement
   A1–A5 (gated); then remaining Track C (fresh-replica L2 seed #6, subscriber durability #7,
-  C5b stampede, outbox #C6) and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape,
-  bounded @Async, catalog, `grantedBy` w/o per-check DB hit, test gaps).
-- **C6 transactional outbox — APPROVED THINKING, NOT YET CODED (2026-10-16).** Design agreed
-  with the user; implement in this order, committing green at each step:
+  C5b stampede) and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape,
+  bounded @Async, catalog, `grantedBy` w/o per-check DB hit, test gaps). **(C6 outbox is
+  now DONE — see the block below.)**
+- **C6 transactional outbox — IMPLEMENTED (2026-10-16).** Built exactly to the design below;
+  `mvn clean verify` → **BUILD SUCCESS** (access-service 31 tests, starter 11; total **42**):
+  - **`V3__outbox.sql`** — `outbox_invalidation(id identity PK, created_at, published_at NULL,
+    version, claimed_at)` + a partial index on the pending set.
+  - **`OutboxService`** — `append()` (in-txn), `tryClaim()` (atomic `UPDATE…WHERE` lease, 30s
+    expiry), `markPublished()`, `pending()` (the alarm), `pendingIds(limit)`.
+  - **`InvalidationRelay`** — shared `process(rowId)` (claim→bump→publish→mark; swallows +
+    records failures so a bad row can't wedge it) + `@Scheduled(fixedDelay=1s)` `poll()` (the
+    durable fallback; body wrapped so a transient DB blip can't spam the log) +
+    `forceInvalidate()` (ops escape hatch). Owns the new `rbac.pdp.outbox.*` metrics.
+  - **Rewired** — `GrantChangeEvent` is now `record(long outboxId)` (no more `INSTANCE`);
+    `AdminService` calls `publishInvalidation()` (→ `outbox.append()` in-txn + event) in all 7
+    mutations; `InvalidationOnCommit` now just delegates to `relay.process(outboxId)`;
+    `AccessServiceApplication` gains `@EnableScheduling`; `AdminController` gains
+    `POST /v1/admin/invalidate`.
+  - **Tests** — `OutboxServiceTest` (5, real-Postgres atomic claim under 8-way concurrency +
+    lease expiry + pending tracking), `InvalidationRelayTest` (6, unit: happy path / lost claim /
+    publish-failure & bump-failure leave the row pending / escape hatch), and 2 new ITs
+    (`relayRecoversPendingRow_andPublishesOnBus`, `adminInvalidate_forcesBumpAndPublish`) +
+    outbox assertions on the admin-change + metrics ITs.
+  - **Design (as agreed, kept for reference):**
   1. **Core idea:** the outbox stores the **intent** ("a bump+publish is owed"), not the
      version — the version bump is a Redis `INCR` side-effect the **relay** performs. Atomicity
      comes from writing the outbox row in the **same Postgres txn** as the grant change, so
@@ -83,7 +103,15 @@
     the healthy case); Kafka transport (ADR D6 already chose RabbitMQ); exactly-once.
   - **Size:** `V3` + `OutboxService`/repo + `InvalidationRelay` + `process()` refactor +
     `/v1/admin/invalidate` ≈ 80–120 lines; touches `AdminService`, `InvalidationOnCommit`,
-    new relay class, migration. Self-contained; no ADR-gated decision. **Not started.**
+    new relay class, migration. Self-contained; no ADR-gated decision.
+  - **Test note:** the design's "broker-down ⇒ row stays pending; broker back ⇒ relay
+    recovers" is covered by (a) `InvalidationRelayTest.process_publishFailureLeavesRowPending`
+    (unit, simulates the outage) + (b) `AccessServiceIntegrationTest.relayRecoversPendingRow`
+    (real infra: a committed-but-unpublished row is recovered by the live relay and lands on the
+    bus). The "two relays race one row" atomicity is pinned against a real Postgres by
+    `OutboxServiceTest.tryClaim_concurrentCallers_exactlyOneWins` (8-way). A literal stop-the-
+    broker-then-restart IT was deliberately avoided: Testcontainers re-maps ports on restart, so
+    the `@ServiceConnection`-wired context would point at a dead port (gotcha-level flake).
 
 **Previously (2026-10-15) — handoff items 1–5 done, committed:**
 - `8bf6fa8` — observability metrics (former §11 item 4) with an
@@ -380,12 +408,17 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
    + logs). Change-audit writes are *synchronous* by design (the mutation is the event).
 10. **Local-only git repo** — no remote configured. Commit locally after each green
     milestone; HEAD history is the only record of what changed.
-11. **Invalidation fires AFTER commit** — `InvalidationOnCommit` runs the version bump +
-    `InvalidationEvent` publish via `@TransactionalEventListener(AFTER_COMMIT)`. A client
+11. **Invalidation fires AFTER commit, and is now durable (C6 outbox).** `AdminService`
+    writes an `outbox_invalidation` row **in the same txn** as the grant change
+    ("bump + publish is owed"); `InvalidationOnCommit` (AFTER_COMMIT) then runs the fast path
+    `InvalidationRelay.process()` = version bump + `InvalidationEvent` publish. A client
     refetching in the publish→commit gap can never read uncommitted grants stamped with the
-    new version. Do not reorder this (bump/publish must stay post-commit). If Redis/RabbitMQ
-    is down at that moment the invalidation is **lost** (the change IS committed): logged at
-    ERROR, clients degrade to TTL-bounded staleness; the durable fix is a transactional outbox.
+    new version — **do not reorder this (bump/publish must stay post-commit)**. If
+    Redis/RabbitMQ is down at that moment the publish fails but the row stays **pending**
+    (never lost): the `@Scheduled` relay re-drives it once the bus is reachable, and the
+    `rbac.pdp.outbox.pending` gauge (should sit at 0) is the alarm. The claim is an atomic
+    `UPDATE…WHERE` lease, so two replicas racing a row yield exactly one winner (at-least-once
+    is safe: a duplicate is a no-op for clients). Ops escape hatch: `POST /v1/admin/invalidate`.
 12. **403 vs 500** — a user who simply *lacks* a scope gets a 403 (`scope()` throws
     `AccessDeniedException`); `ui()` returns an empty `UiElements(app, List.of())`;
     `check()` denies per request. A genuine fault is a 500 — and is **never cached**
@@ -604,19 +637,20 @@ implementation items in §11.
 
 ---
 
-*Last updated: 2026-10-16 (**implementation-vs-design review done** →
-`REVIEW-implementation-vs-design.md`; **ADR-002 proposed** (S1/T1/A1/S2/R1, pending team §7);
-**shipped:** B2 L2 Redis isolation (`rbac.client.redis.*` + `RbacL2Redis` + `RbacClientRedisIsolationTest`),
-Track C — C1 Redis-SPOF bypass (`GrantServiceRedisDownTest` + client test), C4 bounded
-`pdpManagementQueue`, C5a client timeouts; gotcha #25 added; DESIGN §7/§10 updated;
-`mvn clean verify` GREEN — access-service 18 + starter 11 = **29 tests, 0 failures**
-(commits `689f28a`, `d7c0d85`). **C6 transactional-outbox design agreed + captured in §0**
-(≈80–120 lines, self-contained, **not yet coded** — resume from the §0 "C6 … APPROVED THINKING"
-block). Remaining: Track C #6/#7/C5b, Track D, and the ADR-002-gated Track A once the team
-answers §7. Prior: 2026-10-15 (integration tests GREEN + committed; **OTel/OTLP metrics
-committed `8bf6fa8`**; **partition roll-forward + 3-month retention runbook + idempotent script
-committed `d4a6cb6`** (PG-16-verified); handoff items 1–5 complete + committed, item 6 (SpEL
-escape hatch) gated on the team; team review incorporated 2026-10-14, ADR-001 marked Accepted;
-metrics backend chosen 2026-10-15).
+*Last updated: 2026-10-16 (**C6 transactional outbox IMPLEMENTED** — `V3__outbox.sql` +
+`OutboxService` + `InvalidationRelay` (shared `process` + `@Scheduled` relay +
+`POST /v1/admin/invalidate`), `GrantChangeEvent(long outboxId)`, `AdminService` append-in-txn,
+new `rbac.pdp.outbox.{pending gauge,published,failed}` meters; `OutboxServiceTest` 5 +
+`InvalidationRelayTest` 6 + 2 new ITs; `mvn clean verify` GREEN — access-service 31 + starter
+11 = **42 tests, 0 failures**; DESIGN §7 consistency + metrics updated). Prior same day:
+**implementation-vs-design review done** → `REVIEW-implementation-vs-design.md`; **ADR-002
+proposed** (S1/T1/A1/S2/R1, pending team §7); **shipped:** B2 L2 Redis isolation,
+Track C — C1 Redis-SPOF bypass, C4 bounded `pdpManagementQueue`, C5a client timeouts; gotcha
+#25 added (commits `689f28a`, `d7c0d85`). **Remaining:** Track C #6/#7/C5b, Track D, and the
+ADR-002-gated Track A once the team answers §7. Prior: 2026-10-15 (integration tests GREEN +
+committed; **OTel/OTLP metrics committed `8bf6fa8`**; **partition roll-forward + 3-month
+retention runbook + idempotent script committed `d4a6cb6`** (PG-16-verified); handoff items 1–5
+complete + committed, item 6 (SpEL escape hatch) gated on the team; team review incorporated
+2026-10-14, ADR-001 marked Accepted; metrics backend chosen 2026-10-15).
 If you change a decision (D1–D10), update the ADR decision-log first, then this
 file — keep the three artifacts in agreement.*

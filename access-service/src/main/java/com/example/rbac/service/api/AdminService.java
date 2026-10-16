@@ -13,6 +13,7 @@ import com.example.rbac.service.domain.Template;
 import com.example.rbac.service.domain.TemplateElement;
 import com.example.rbac.service.domain.TemplateRepository;
 import com.example.rbac.service.invalidation.GrantChangeEvent;
+import com.example.rbac.service.invalidation.OutboxService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.context.ApplicationEventPublisher;
@@ -27,9 +28,11 @@ import java.util.Set;
 
 /**
  * Grant authoring (ADR A5, D6, D8, D10). Every mutation: persists, writes a
- * change-audit row, and publishes a {@link GrantChangeEvent} that — AFTER the
- * transaction commits — bumps the global version and pushes an invalidation
- * event so every client replica drops stale L1 near-instantly.
+ * change-audit row, records an invalidation intent in the transactional outbox
+ * (same transaction — C6), and publishes a {@link GrantChangeEvent} that — AFTER
+ * the transaction commits — bumps the global version and pushes an invalidation
+ * event so every client replica drops stale L1 near-instantly (with the relay
+ * as the durable fallback if that publish fails).
  */
 @Service
 public class AdminService {
@@ -40,19 +43,21 @@ public class AdminService {
     private final ProfileScopeRepository scopes;
     private final TemplateRepository templates;
     private final ApplicationEventPublisher events;
+    private final OutboxService outbox;
     private final AuditService audit;
     private final ObjectMapper json;
 
     public AdminService(ProfileRepository profiles, PermissionRepository permissions,
                         ResourceTypeRepository resourceTypes, ProfileScopeRepository scopes,
                         TemplateRepository templates, ApplicationEventPublisher events,
-                        AuditService audit, ObjectMapper json) {
+                        OutboxService outbox, AuditService audit, ObjectMapper json) {
         this.profiles = profiles;
         this.permissions = permissions;
         this.resourceTypes = resourceTypes;
         this.scopes = scopes;
         this.templates = templates;
         this.events = events;
+        this.outbox = outbox;
         this.audit = audit;
         this.json = json;
     }
@@ -64,7 +69,7 @@ public class AdminService {
         }
         Profile p = profiles.save(new Profile(name, description));
         audit.change(actor, "profile", name, "create", "{}");
-        events.publishEvent(GrantChangeEvent.INSTANCE);
+        publishInvalidation();
         return p;
     }
 
@@ -78,7 +83,7 @@ public class AdminService {
             profiles.save(p);
         }
         audit.change(actor, "profile", profileName, "grant_permission", "{\"key\":\"" + permissionKey + "\"}");
-        events.publishEvent(GrantChangeEvent.INSTANCE);
+        publishInvalidation();
     }
 
     @Transactional
@@ -91,7 +96,7 @@ public class AdminService {
             profiles.save(p);
         }
         audit.change(actor, "profile", profileName, "revoke_permission", "{\"key\":\"" + permissionKey + "\"}");
-        events.publishEvent(GrantChangeEvent.INSTANCE);
+        publishInvalidation();
     }
 
     @Transactional
@@ -111,7 +116,7 @@ public class AdminService {
         detail.put("resourceType", resourceTypeName);
         detail.put("dimensions", dimensions);
         audit.change(actor, "profile", profileName, "set_scope", toJson(detail));
-        events.publishEvent(GrantChangeEvent.INSTANCE);
+        publishInvalidation();
     }
 
     @Transactional
@@ -128,7 +133,7 @@ public class AdminService {
         Template saved = templates.save(t);   // cascade = PERSIST writes the elements
         audit.change(actor, "template", appId + "/" + name, "create",
                 "{\"elements\":" + toJson(elementPermissions) + "}");
-        events.publishEvent(GrantChangeEvent.INSTANCE);
+        publishInvalidation();
         return saved;
     }
 
@@ -142,7 +147,7 @@ public class AdminService {
         profiles.save(p);
         audit.change(actor, "profile", profileName, "attach_template",
                 "{\"app\":\"" + appId + "\",\"template\":\"" + templateName + "\"}");
-        events.publishEvent(GrantChangeEvent.INSTANCE);
+        publishInvalidation();
     }
 
     @Transactional
@@ -158,11 +163,23 @@ public class AdminService {
         ResourceType rt = resourceTypes.save(new ResourceType(name, ownerService, toJson(dimensionSchema)));
         audit.change(actor, "resource_type", name, "register",
                 "{\"ownerService\":\"" + ownerService + "\"}");
-        events.publishEvent(GrantChangeEvent.INSTANCE);
+        publishInvalidation();
         return rt;
     }
 
     // --- helpers ---
+
+    /**
+     * Record the invalidation intent (an outbox row) in the CURRENT transaction, then
+     * publish the in-transaction event that — AFTER commit — bumps the version and
+     * pushes the invalidation (ADR D10). Writing the outbox row in the same transaction
+     * as the grant change is what makes "change committed &rArr; invalidation owed"
+     * atomic (C6): it survives a Redis/RabbitMQ outage at commit time and a crash right
+     * after commit. If the after-commit publish fails, the relay re-drives the row.
+     */
+    private void publishInvalidation() {
+        events.publishEvent(new GrantChangeEvent(outbox.append()));
+    }
 
     private Profile requireProfile(String name) {
         return profiles.findByName(name)

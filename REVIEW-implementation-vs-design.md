@@ -135,7 +135,7 @@ Gated on team answers to ADR-002 §7 (Q1–Q5). **No code until Accepted.**
 - **C3** make the subscriber's `RabbitAdmin`+container beans, `setAmqpAdmin`, add a lost-bus metric + broker-restart test (#7).
 - **C4** delete (or TTL + `x-max-length`) the durable `pdpManagementQueue` (#8).
 - **C5** timeouts + Caffeine `get(key, loader)` stampede protection + optional breaker (#10).
-- **C6** **transactional outbox now** (removes the "lost invalidation" foot-gun C1–C3 all touch); at minimum `POST /v1/admin/invalidate`.
+- **C6** **transactional outbox now** (removes the "lost invalidation" foot-gun C1–C3 all touch); at minimum `POST /v1/admin/invalidate`. **Done 2026-10-16** — see §6.
 
 ### Track D — Correctness cleanups + the big cache win
 - **D1** **key the cache on the profile set** (not `(userId, profileSet)`) — highest-leverage change (15k → dozens of entries; per-profile invalidation becomes trivial).
@@ -168,5 +168,6 @@ Gated on team answers to ADR-002 §7 (Q1–Q5). **No code until Accepted.**
   - **C1 (Redis SPOF bypass, #5):** client falls through to the PDP when an L2 read fails (`rbac.client.cache{tier=l2,result=error}`); PDP `GrantService` degrades to Postgres-computed grants when Redis is down. `GrantServiceRedisDownTest` + a client test.
   - **C4 (durable-queue leak, #8):** the un-consumed `pdpManagementQueue` is now bounded (TTL + max-length).
   - **C5a (timeouts, #10):** the starter's PDP `RestClient` has connect (2s) + read (5s) timeouts. (C5b stampede protection still to do.)
+- **Track C — C6 (transactional outbox, removes the "lost invalidation" foot-gun):** `V3__outbox.sql` (`outbox_invalidation`) + `OutboxService` (`append()` in-txn, atomic `tryClaim()` lease, `pending()`, `pendingIds()`) + `InvalidationRelay` (shared `process()` = claim→bump→publish→mark, `@Scheduled(fixedDelay=1s)` durable relay, `forceInvalidate()` escape hatch). `AdminService` writes the outbox intent in the same txn as the grant change; `InvalidationOnCommit` delegates to the relay; `GrantChangeEvent` carries the outbox id; `POST /v1/admin/invalidate` added. New meters `rbac.pdp.outbox.{pending gauge,published,failed}` (replacing `rbac.pdp.invalidation.{lost,published}`). Tests: `OutboxServiceTest` (5, real-Postgres atomic claim under concurrency) + `InvalidationRelayTest` (6, unit) + 2 new ITs. `mvn clean verify` GREEN (42 tests).
 
-**Not yet started (needs the ADR or is next):** B1 (auth, gated on Q1); the rest of Track C (#6 fresh-replica L2 seed, #7 subscriber durability, C5b stampede, **C6 outbox — design agreed and captured in `AGENTS.md` §0 "C6 … APPROVED THINKING" block, resume from there**); and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape, bounded `@Async`, explicit catalog, `grantedBy` without a per-check DB hit, the §3 test gaps). Each is a self-contained, testable increment.
+**Not yet started (needs the ADR or is next):** B1 (auth, gated on Q1); the rest of Track C (#6 fresh-replica L2 seed, #7 subscriber durability, C5b stampede); and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape, bounded `@Async`, explicit catalog, `grantedBy` without a per-check DB hit, the §3 test gaps). Each is a self-contained, testable increment.
