@@ -39,11 +39,7 @@
     read (5s) timeouts (`rbac.client.connect-timeout` / `.read-timeout`) so a hung PDP can't
     hold request threads. (C5's stampede protection — Caffeine `get(key, loader)` — still to do.)
   `mvn clean verify` → **BUILD SUCCESS** (access-service 18 tests, starter 11; total 29).
-- **Next (per `REVIEW-implementation-vs-design.md` §4):** team answers ADR-002 §7 → implement
-  A1–A5 (gated); then remaining Track C (fresh-replica L2 seed #6, subscriber durability #7,
-  C5b stampede) and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape,
-  bounded @Async, catalog, `grantedBy` w/o per-check DB hit, test gaps). **(C6 outbox is
-  now DONE — see the block below.)**
+- **Next (per `REVIEW-implementation-vs-design.md` §4):** **ADR-002 is now ACCEPTED** (all §7 answered) → implement the gated Track A: **S1** (mesh-mTLS primary / OAuth2 fallback / OIDC admin), **T1** (template = catalog), **S2** (scopes fail-closed + canonical **Option A**), **R1** (1-yr retention + `granted_at`/`granted_by`); **A1 is DESCOPED** (audit = issuance + changes only — no PEP emitter). Then remaining Track C (fresh-replica L2 seed #6, subscriber durability #7, C5b stampede) and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape, bounded @Async, catalog, `grantedBy` w/o per-check DB hit, test gaps). **(C6 outbox is DONE — `812b3a3`.)**
 - **C6 transactional outbox — IMPLEMENTED (2026-10-16, committed `812b3a3`).** Built exactly
   to the design below; `mvn clean verify` → **BUILD SUCCESS** (access-service 31 tests,
   starter 11; total **42**):
@@ -638,21 +634,24 @@ implementation items in §11.
 
 ---
 
-*Last updated: 2026-10-16 (**C6 transactional outbox IMPLEMENTED** — `V3__outbox.sql` +
-`OutboxService` + `InvalidationRelay` (shared `process` + `@Scheduled` relay +
-`POST /v1/admin/invalidate`), `GrantChangeEvent(long outboxId)`, `AdminService` append-in-txn,
-new `rbac.pdp.outbox.{pending gauge,published,failed}` meters; `OutboxServiceTest` 5 +
-`InvalidationRelayTest` 6 + 2 new ITs; `mvn clean verify` GREEN — access-service 31 + starter
-11 = **42 tests, 0 failures**; DESIGN §7 consistency + metrics updated; committed `812b3a3`).
-Prior same day:
-**implementation-vs-design review done** → `REVIEW-implementation-vs-design.md`; **ADR-002
-proposed** (S1/T1/A1/S2/R1, pending team §7); **shipped:** B2 L2 Redis isolation,
+*Last updated: 2026-10-16 (**ADR-002 ACCEPTED** — team answered all §7: Q1 S1 = K8s mesh-mTLS
+primary / OAuth2 client-credentials fallback / OIDC admin; Q2 T1 = catalog; **Q3 A1 = DESCOPED**
+(audit = issuance + changes only, no PEP emitter — overrides the (a) recommendation); Q4 S2 =
+fail-closed + canonical **Option A**; Q5 R1 = 1-yr `audit_change` retention + `granted_at`/
+`granted_by`. Track A now unblocked: implement S1/T1/S2/R1, A1 descoped).
+Also same day: **C6 transactional outbox IMPLEMENTED** (`V3__outbox.sql` + `OutboxService` +
+`InvalidationRelay` (shared `process` + `@Scheduled` relay + `POST /v1/admin/invalidate`),
+`GrantChangeEvent(long outboxId)`, `AdminService` append-in-txn, new `rbac.pdp.outbox.{pending
+gauge,published,failed}` meters; `OutboxServiceTest` 5 + `InvalidationRelayTest` 6 + 2 new ITs;
+`mvn clean verify` GREEN — access-service 31 + starter 11 = **42 tests, 0 failures**; DESIGN §7
+consistency + metrics updated; committed `812b3a3`). Prior same day: **implementation-vs-design
+review done** → `REVIEW-implementation-vs-design.md`; **shipped:** B2 L2 Redis isolation,
 Track C — C1 Redis-SPOF bypass, C4 bounded `pdpManagementQueue`, C5a client timeouts; gotcha
-#25 added (commits `689f28a`, `d7c0d85`). **Remaining:** Track C #6/#7/C5b, Track D, and the
-ADR-002-gated Track A once the team answers §7. Prior: 2026-10-15 (integration tests GREEN +
-committed; **OTel/OTLP metrics committed `8bf6fa8`**; **partition roll-forward + 3-month
-retention runbook + idempotent script committed `d4a6cb6`** (PG-16-verified); handoff items 1–5
-complete + committed, item 6 (SpEL escape hatch) gated on the team; team review incorporated
-2026-10-14, ADR-001 marked Accepted; metrics backend chosen 2026-10-15).
+#25 added (commits `689f28a`, `d7c0d85`). **Remaining:** Track A (S1/T1/S2/R1), Track C #6/#7/
+C5b, Track D. Prior: 2026-10-15 (integration tests GREEN + committed; **OTel/OTLP metrics
+committed `8bf6fa8`**; **partition roll-forward + 3-month retention runbook + idempotent script
+committed `d4a6cb6`** (PG-16-verified); handoff items 1–5 complete + committed, item 6 (SpEL
+escape hatch) gated on the team; team review incorporated 2026-10-14, ADR-001 marked Accepted;
+metrics backend chosen 2026-10-15).
 If you change a decision (D1–D10), update the ADR decision-log first, then this
 file — keep the three artifacts in agreement.*

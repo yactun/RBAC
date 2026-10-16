@@ -118,12 +118,12 @@ No test exists for: **Redis down** (#5), **broker restart** (#7), a **fresh repl
 Two rules shape the order (both from the repo's own discipline): (1) **ADR-gated items are decided before code** (AGENTS.md standing instruction; ADR-001 §11); (2) keep the build green and commit at milestones.
 
 ### Track A — Decide first (ADR-002), then code
-Gated on team answers to ADR-002 §7 (Q1–Q5). **No code until Accepted.**
-- **A1 = ADR-002 S1** (PDP auth + actor-from-principal) — enforces D2's stated mitigation.
+**ADR-002 ACCEPTED 2026-10-16** (all §7 answered). Unblocked — implement with regression tests:
+- **A1 = ADR-002 S1** (PDP auth + actor-from-principal; K8s mesh-mTLS primary, OAuth2 client-credentials fallback, OIDC admin) — enforces D2's stated mitigation.
 - **A2 = ADR-002 T1** (template = catalog, not bundle) — root fix for #4; revoke becomes effective.
-- **A3 = ADR-002 A1** (decision audit at the PEP) — resolves the D8↔D9 contradiction (#2).
-- **A4 = ADR-002 S2** (scopes fail-closed + DELETE) — fixes the #3 fail-open.
-- **A5 = ADR-002 R1** (change-audit retention ≥ 1 yr + `granted_at`) — compliance.
+- **A3 = ADR-002 A1 — DESCOPED** (team chose option c): audit = grant issuance + changes only; **no PEP batch emitter**. Resolves the D8↔D9 contradiction (#2) by choosing D9 (local derivation) + dropping the per-check audit obligation.
+- **A4 = ADR-002 S2** (scopes fail-closed + canonical **Option A** typed-predicate format + DELETE) — fixes the #3 fail-open.
+- **A5 = ADR-002 R1** (`audit_change` retention ≥ 1 yr + `granted_at`/`granted_by`) — compliance.
 
 ### Track B — Security hardening (implements stated intent; B2 needs no decision)
 - **B1 = ADR-002 S1** code: `spring-security` + OAuth2 resource server; separate authority for `/v1/admin/**`; actor from the verified principal. *Gated on Q1 (which IdP).*
@@ -155,7 +155,7 @@ Gated on team answers to ADR-002 §7 (Q1–Q5). **No code until Accepted.**
 | Q4 | Confirm scopes **fail closed** (breaking `Scope.values()` change) + DELETE? (S2) | Track A4 |
 | Q5 | `audit_change` retention **floor** (compliance) + `granted_by` on M2M rows? (R1) | Track A5 |
 
-**Suggested order** (review's, refined): **B2 (done) → decide A1–A5 → A4/S2 (fail-closed, quick) → A2/T1 (template) → B1/S1 (auth) → A3 (decision audit, needs the ADR) → C-track → D1 (profileSet keying) → C6 (outbox).** Points #2, #4, and change-audit retention change team-accepted decisions, so per the standing instruction they land in **ADR-002 first**, then code.
+**Suggested order** (review's, refined): **B2 (done) → C6 (done, `812b3a3`) → ADR-002 ACCEPTED → A4/S2 (fail-closed + Option A) → A2/T1 (template) → A5/R1 (retention) → B1/S1 (auth) → A3 (descoped, doc-only) → C-track → D1 (profileSet keying).** Points #2, #4, and change-audit retention change team-accepted decisions, so per the standing instruction they landed in **ADR-002 first (now Accepted)**, then code.
 
 ---
 

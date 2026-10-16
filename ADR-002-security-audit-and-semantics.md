@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Proposed** (2026-10-16) — drafted from the implementation-vs-design review; pending team confirmation on §7 before any gated code lands |
+| **Status** | **Accepted** (2026-10-16) — all §7 questions answered by the team (see §7 Team-review notes + §9 decision log). Gated implementation (Tracks A/B) may proceed. |
 | **Date** | 2026-10-16 |
 | **Deciders** | Platform / Identity team (+ compliance owner for R1) |
 | **Related** | `ADR-001-user-access-service.md` (superseded-in-part: D4, D8), `DESIGN.md`, `REVIEW-implementation-vs-design.md` (evidence) |
@@ -60,6 +60,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **Consequences:** Admin API is no longer open; the audit `actor` is a verified identity; the decision path gains an auth check (cheap, cached JWKS). The starter's `AccessClient` must present a client token when calling the PDP (see A1/T1 for how the starter changes anyway).
 - **When to reconsider:** If the platform mandates a specific IdP flow (e.g. SPIFFE workload identity / mTLS-only), conform to it — the *principle* (verified principal + separated admin authZ + actor-from-principal) is the invariant, not the token format.
 - **Open (team):** **Which identity issuer** do we validate against (existing IDM / Keycloak / other), and do we already run a mesh (in which case authN may be mesh-level and we focus on authZ + actor)? *(§7 Q1.)*
+- **✅ Team decision (2026-10-16):** Platform is **Kubernetes**. S2S = **mesh mTLS + workload identity** (primary) with **OAuth2 client-credentials as fallback**; admin via **OIDC**. Implement as a **config-gated, mode-switchable** auth layer (`mesh` | `jwt` | `disabled`) so the PDP works on both paths; the *invariant* (verified principal + separated admin authZ + actor-from-principal) is enforced regardless of mode.
 
 ### T1 — A template is a **layout catalog**, not a grant-bundle
 
@@ -76,6 +77,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **Consequences:** `RbacResolverTest` continues to pass (it already encodes the intended semantics); the **integration test** that asserts template permissions appear in `GrantSet.permissions` must be updated to assert the *opposite* (elements listed, not granted) — a deliberate, visible break, which is the point.
 - **When to reconsider:** If the platform must centrally *own and enforce* layout (the D4 reconsider trigger), revisit — but that's a different (bigger) change.
 - **Open (team):** Confirm "catalog, not bundle" as the intended semantics (it matches the existing design example and test). *(§7 Q2.)*
+- **✅ Team decision (2026-10-16): ACCEPTED.** Catalog semantics; attach does not grant. Rationale: *better no data than a data breach — a user who lacks access raises a support ticket.*
 
 ### A1 — Decision audit lives at the **PEP**; PDP keeps change-audit + grant-issuance
 
@@ -92,6 +94,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **Consequences:** `audit_decision` reflects real production decisions; the "async, never on the hot path" guarantee of D8 is preserved (batched, fire-and-forget with a bounded buffer + drop-and-metric on overflow, mirroring the existing swallow-and-log posture).
 - **When to reconsider:** If decision volume or the need for streaming analytics grows → switch the transport to an OTLP log stream / Kafka without changing the record shape.
 - **Open (team):** Confirm PEP-side batched decision audit (vs. descoping, vs. OTLP-first). *(§7 Q3.)*
+- **✅ Team decision (2026-10-16): option (c) — DESCOPED.** Audit covers **grant issuance + changes only**, not per-check decisions. This **overrides the (a) recommendation above**. Consequence: **no PEP batch emitter or new `/v1/audit/decision` endpoint is built**; the raw `/v1/check` + its inline `audit.decision` may remain for direct-API callers, and `audit_decision` is no longer a mandated production control. D8↔D9 resolved by choosing D9 (local derivation) and dropping the per-check audit obligation.
 
 ### S2 — Scopes fail-closed: throw on unknown dimension; empty = wildcard; add DELETE
 
@@ -108,6 +111,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **Consequences:** Typos surface loudly (fail-closed) instead of widening access; scope revocation has an explicit endpoint; the design example is corrected.
 - **When to reconsider:** If a legitimate "optional dimension" pattern emerges (some callers don't filter on a dimension at all), model it explicitly (e.g. an `ALL` marker value) rather than silently treating absence as all.
 - **Open (team):** Confirm the fail-closed semantics + the breaking change. *(§7 Q4.)*
+- **✅ Team decision (2026-10-16): CONFIRMED, using canonical format Option A.** Typed predicates with a closed op set (`IN/EQ/GT/GTE/LT/LTE/BETWEEN`), flat AND, `IN` empty = deny, explicit `ALL` for all-rows, unknown dim/op = throw. Starter validates the PDP response before any query; the developer owns the final filter mapping.
 
 ### R1 — Retention split: `audit_change` ≥ 1 year, `audit_decision` 3 months; add `granted_at`
 
@@ -123,6 +127,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **Consequences:** "Who granted admin to X?" stays answerable for ≥ 1 year; decision-audit cost bounded; the partition job is table-aware.
 - **When to reconsider:** If the compliance owner specifies a different floor (e.g. 7 years for SOX in some scopes), set the `audit_change` window to that.
 - **Open (team/compliance):** Confirm the exact `audit_change` retention floor and whether `granted_by` (actor) is required on the M2M rows. *(§7 Q5.)*
+- **✅ Team decision (2026-10-16): 1-year floor adopted** for `audit_change` (SOX/ISO 27001 norm); `audit_decision` stays 3 months; add `granted_at` + `granted_by` to the live M2M rows.
 
 ---
 
@@ -173,6 +178,14 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 
 > **Process:** answers to Q1–Q5 are recorded as **Team review** notes in §3 (matching the ADR-001 §8 pattern), the Status moves to **Accepted**, and only then do the gated items (S1, T1, A1, S2, R1) get implemented with their regression tests. The non-gated code fixes (Redis SPOF, fresh-replica L2, subscriber durability, durable-queue leak, timeouts, JSON-escaping, 404/409, cache-key-on-profileSet, transactional outbox) proceed on the review page's plan and need **no** ADR.
 
+### Team review — answers (2026-10-16)
+
+- **Q1 (S1):** We run **Kubernetes**. Primary S2S path = **service-mesh mTLS + workload identity** (e.g. Istio Ambient / SPIFFE); **fall back to OAuth2 client-credentials** if a mesh is not available. Admin (human/CI) via **OIDC**. Invariant holds either way: verified principal + separated admin authZ + actor-from-principal.
+- **Q2 (T1):** **Accepted — catalog, not grant-bundle.** Attaching a template does *not* grant its element permissions. Rationale (team): *better no data than a data breach; a user who lacks access raises a support ticket.*
+- **Q3 (A1):** **Descoped (option c)** — audit covers **grant issuance + changes only**, *not* per-check decisions. This **overrides the §3-A1 recommendation (option a)**. The raw `/v1/check` + its inline decision audit may remain for direct-API callers, but per-check audit on the production (starter) path is **out of scope by decision**.
+- **Q4 (S2):** **Fail-closed confirmed (option a), using canonical format Option A** (typed predicates, closed op set `IN/EQ/GT/GTE/LT/LTE/BETWEEN`, flat AND, `IN` empty = deny, explicit `ALL` for all-rows, unknown dim/op = throw). Starter validates the PDP response before it reaches any query; the developer owns the final filter mapping.
+- **Q5 (R1):** **1-year retention floor adopted** for `audit_change` (industry norm, SOX/ISO 27001); `audit_decision` stays 3 months; add `granted_at`/`granted_by` to the live M2M rows.
+
 ---
 
 ## 8. How to validate (testable properties, once accepted)
@@ -189,12 +202,12 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 
 1. 2026-10-16 — Implementation-vs-design review completed; claims verified against source (see `REVIEW-implementation-vs-design.md`).
 2. 2026-10-16 — This ADR drafted with **recommended** decisions for S1/T1/A1/S2/R1; **Proposed** pending team answers to §7 (Q1–Q5).
-3. *(next)* — Team answers recorded; Status → **Accepted**; gated implementation scheduled per `REVIEW-implementation-vs-design.md` Tracks A/B.
+3. 2026-10-16 — **Team answers recorded** (§7 Team-review notes): Q1 = K8s, mesh mTLS primary + OAuth2 client-credentials fallback + OIDC admin; Q2 = catalog (accepted); **Q3 = DESCOPED (option c, overrides the (a) recommendation)**; Q4 = fail-closed, canonical **Option A**; Q5 = 1-year floor + `granted_at`/`granted_by`. **Status → Accepted.** Gated implementation proceeds per `REVIEW-implementation-vs-design.md` Tracks A/B.
 
 ---
 
 ## 10. Status & next steps
 
-- **Status: Proposed** (2026-10-16). Pending team confirmation on §7 (Q1–Q5).
-- **On acceptance:** implement S1, T1, A1, S2, R1 with their §8 regression tests; update `DESIGN.md` (template semantics §4.4, scope §6 example, audit §8) and `AGENTS.md` to keep the three artifacts in agreement; record the new gotchas.
-- **Not gated by this ADR** (proceed on the review plan): Redis SPOF bypass, fresh-replica L2 seeding, subscriber durability, durable-queue leak, timeouts/stampede, JSON-escaping, 404/409, **cache-key-on-profileSet**, **transactional outbox**. See `REVIEW-implementation-vs-design.md`.
+- **Status: ACCEPTED** (2026-10-16). All §7 questions answered by the team (see §7 Team-review notes).
+- **On acceptance:** implement S1, T1, S2, R1 with their §8 regression tests; **A1 is descoped** (team chose option c — no PEP batch emitter; audit = issuance + changes only). Update `DESIGN.md` (template semantics §4.4, scope §6, audit §8) and `AGENTS.md` to keep the three artifacts in agreement; record the new gotchas.
+- **Not gated by this ADR** (proceed on the review plan): Redis SPOF bypass, fresh-replica L2 seeding, subscriber durability, durable-queue leak, timeouts/stampede, JSON-escaping, 404/409, **cache-key-on-profileSet**, **transactional outbox (done — `812b3a3`)**. See `REVIEW-implementation-vs-design.md`.
