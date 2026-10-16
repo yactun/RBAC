@@ -44,8 +44,9 @@
   C5b stampede) and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape,
   bounded @Async, catalog, `grantedBy` w/o per-check DB hit, test gaps). **(C6 outbox is
   now DONE — see the block below.)**
-- **C6 transactional outbox — IMPLEMENTED (2026-10-16).** Built exactly to the design below;
-  `mvn clean verify` → **BUILD SUCCESS** (access-service 31 tests, starter 11; total **42**):
+- **C6 transactional outbox — IMPLEMENTED (2026-10-16, committed `812b3a3`).** Built exactly
+  to the design below; `mvn clean verify` → **BUILD SUCCESS** (access-service 31 tests,
+  starter 11; total **42**):
   - **`V3__outbox.sql`** — `outbox_invalidation(id identity PK, created_at, published_at NULL,
     version, claimed_at)` + a partial index on the pending set.
   - **`OutboxService`** — `append()` (in-txn), `tryClaim()` (atomic `UPDATE…WHERE` lease, 30s
@@ -642,7 +643,8 @@ implementation items in §11.
 `POST /v1/admin/invalidate`), `GrantChangeEvent(long outboxId)`, `AdminService` append-in-txn,
 new `rbac.pdp.outbox.{pending gauge,published,failed}` meters; `OutboxServiceTest` 5 +
 `InvalidationRelayTest` 6 + 2 new ITs; `mvn clean verify` GREEN — access-service 31 + starter
-11 = **42 tests, 0 failures**; DESIGN §7 consistency + metrics updated). Prior same day:
+11 = **42 tests, 0 failures**; DESIGN §7 consistency + metrics updated; committed `812b3a3`).
+Prior same day:
 **implementation-vs-design review done** → `REVIEW-implementation-vs-design.md`; **ADR-002
 proposed** (S1/T1/A1/S2/R1, pending team §7); **shipped:** B2 L2 Redis isolation,
 Track C — C1 Redis-SPOF bypass, C4 bounded `pdpManagementQueue`, C5a client timeouts; gotcha
