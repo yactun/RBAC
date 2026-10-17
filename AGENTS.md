@@ -28,7 +28,7 @@
   rows); `ops/rotate_audit_partitions.sql` + RUNBOOK split windows (decision 3 mo / change
   12 mo), verified on real PG16; A1 descoping recorded in DESIGN §8 (no PEP emitter, no new
   endpoint — raw `/v1/check` + inline `audit.decision` remain).
-- **S1 (S2S auth + actor-from-principal, this session):** config-gated
+- **S1 (S2S auth + actor-from-principal, `12d9d8c`):** config-gated
   `rbac.pdp.auth.{enabled,mode,admin-authority,admin-principals}` (`enabled` defaults
   `false` + loud startup WARN — dev/tests unchanged). `mode=mesh`: `MeshAuthFilter` takes
   the SPIFFE ID from `Forwarded-Client-Cert`; `mode=jwt`: OAuth2 resource server (token
@@ -703,7 +703,7 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     (`granted_at`/`granted_by` on the 3 live grant tables, stamped in-txn), split
     retention windows in the ops script + runbook; **A1 descoped** (no PEP emitter /
     no new endpoint; recorded in DESIGN §8).
-  - **S1 (this session's commit — see git log)** — S2S auth on the PDP:
+  - **S1 (committed `12d9d8c`)** — S2S auth on the PDP:
     `security/{CallerIdentity, AuthPrincipal, MeshAuthFilter, RbacSecurityConfig,
     RbacAuthDisabledWarning}`; `rbac.pdp.auth.{enabled,mode,admin-authority,admin-principals}`;
     actor-always-from-verified-principal in `AdminController`/`DecisionController`;
@@ -781,7 +781,7 @@ implementation items in §11.
 
 *Last updated: 2026-10-17 (**TRACK A (ADR-002) SHIPPED** — S1/T1/S2/R1 implemented, A1 descoped;
 `mvn clean verify` → **88 tests, 0 failures** (access-service 72 + starter 16). Commits: T1
-`ed2d13e`, S2 `2bd63ab`, R1+A1 `6f53a5b`, S1 = this session's commit (see git log). New gotchas
+`ed2d13e`, S2 `2bd63ab`, R1+A1 `6f53a5b`, S1 `12d9d8c`. New gotchas
 #28–#31 (S1 security-chain wiring). ADR-002 marked implemented per decision; DESIGN §1/§2/§4/§6/
 §10/§12 + this file in agreement. **Remaining:** Track C #6/#7/C5b, Track D. Prior day 2026-10-16:
 **ADR-002 ACCEPTED** — team answered all §7: Q1 S1 = K8s mesh-mTLS primary / OAuth2
