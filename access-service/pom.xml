@@ -44,6 +44,15 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
+    <!-- S1 (ADR-002): the OAuth2/OIDC resource server for the `jwt` auth mode
+         (bearer token validation; issuer via
+         spring.security.oauth2.resourceserver.jwt.issuer-uri). The `mesh` mode
+         needs no token machinery (the mesh conveys identity via
+         Forwarded-Client-Cert after terminating mTLS). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
     <!-- Metrics backend: OpenTelemetry (CNCF-graduated). Meters are recorded via
          the Micrometer API and exported as OTLP to the platform's OTel collector
          (Prometheus/Tempo/etc. stay backends behind the collector, not app concerns). -->

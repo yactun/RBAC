@@ -2,6 +2,8 @@ package com.example.rbac.service.api;
 
 import com.example.rbac.model.dto.Scope;
 import com.example.rbac.service.invalidation.InvalidationRelay;
+import com.example.rbac.service.security.AuthPrincipal;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
@@ -12,6 +14,12 @@ import java.util.Set;
 /**
  * Audited grant authoring (design §4.3). Every endpoint records the actor and
  * triggers version bump + invalidation (ADR D6, D8, D10).
+ *
+ * <p>S1 (ADR-002): the actor is the <b>verified principal</b>
+ * ({@link AuthPrincipal#current}) — the mesh's SPIFFE ID or the OIDC subject —
+ * never a client-supplied header when auth is enabled. When auth is disabled
+ * (dev/test) it falls back to the {@code X-Actor} header. Authorization
+ * (401/403) is enforced by the security chain, not here.
  */
 @RestController
 @RequestMapping("/v1/admin")
@@ -25,25 +33,29 @@ public class AdminController {
         this.relay = relay;
     }
 
+    private static String actor(HttpServletRequest request) {
+        return AuthPrincipal.current(request).principal();
+    }
+
     @PostMapping("/profiles")
     @ResponseStatus(HttpStatus.CREATED)
-    public Map<String, Object> createProfile(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+    public Map<String, Object> createProfile(HttpServletRequest request,
                                              @RequestBody ProfileBody body) {
-        var profile = admin.createProfile(actor, body.name(), body.description());
+        var profile = admin.createProfile(actor(request), body.name(), body.description());
         return Map.of("name", profile.getName());
     }
 
     @PostMapping("/profiles/{name}/permissions")
-    public Map<String, String> grantPermission(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+    public Map<String, String> grantPermission(HttpServletRequest request,
                                                @PathVariable String name, @RequestBody KeyBody body) {
-        admin.grantPermission(actor, name, body.key());
+        admin.grantPermission(actor(request), name, body.key());
         return Map.of("status", "granted");
     }
 
     @DeleteMapping("/profiles/{name}/permissions/{key}")
-    public Map<String, String> revokePermission(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+    public Map<String, String> revokePermission(HttpServletRequest request,
                                                 @PathVariable String name, @PathVariable String key) {
-        admin.revokePermission(actor, name, key);
+        admin.revokePermission(actor(request), name, key);
         return Map.of("status", "revoked");
     }
 
@@ -53,51 +65,51 @@ public class AdminController {
      * resource type's dimension schema (400 on an unknown op/dimension).
      */
     @PutMapping("/profiles/{name}/scopes/{resourceType}")
-    public Map<String, String> setScope(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+    public Map<String, String> setScope(HttpServletRequest request,
                                         @PathVariable String name, @PathVariable String resourceType,
                                         @RequestBody List<Scope.Filter> filters) {
-        admin.setScope(actor, name, resourceType, filters);
+        admin.setScope(actor(request), name, resourceType, filters);
         return Map.of("status", "set");
     }
 
     /** S2 (ADR-002): explicit scope revocation (remove the whole scope for the resource type). */
     @DeleteMapping("/profiles/{name}/scopes/{resourceType}")
-    public Map<String, String> deleteScope(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+    public Map<String, String> deleteScope(HttpServletRequest request,
                                            @PathVariable String name, @PathVariable String resourceType) {
-        admin.deleteScope(actor, name, resourceType);
+        admin.deleteScope(actor(request), name, resourceType);
         return Map.of("status", "deleted");
     }
 
     @PostMapping("/templates")
     @ResponseStatus(HttpStatus.CREATED)
-    public Map<String, Object> createTemplate(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+    public Map<String, Object> createTemplate(HttpServletRequest request,
                                               @RequestBody TemplateBody body) {
-        var t = admin.createTemplate(actor, body.appId(), body.name(), body.elements());
+        var t = admin.createTemplate(actor(request), body.appId(), body.name(), body.elements());
         return Map.of("appId", t.getAppId(), "name", t.getName());
     }
 
     @PostMapping("/profiles/{name}/templates")
-    public Map<String, String> attachTemplate(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+    public Map<String, String> attachTemplate(HttpServletRequest request,
                                               @PathVariable String name, @RequestBody TemplateRef body) {
-        admin.attachTemplate(actor, name, body.appId(), body.name());
+        admin.attachTemplate(actor(request), name, body.appId(), body.name());
         return Map.of("status", "attached");
     }
 
     @DeleteMapping("/profiles/{name}/templates/{appId}/{templateName}")
-    public Map<String, String> detachTemplate(@RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+    public Map<String, String> detachTemplate(HttpServletRequest request,
                                               @PathVariable String name,
                                               @PathVariable String appId,
                                               @PathVariable String templateName) {
-        admin.detachTemplate(actor, name, appId, templateName);
+        admin.detachTemplate(actor(request), name, appId, templateName);
         return Map.of("status", "detached");
     }
 
     @PostMapping("/resource-types")
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> registerResourceType(
-            @RequestHeader(value = "X-Actor", defaultValue = "unknown") String actor,
+            HttpServletRequest request,
             @RequestBody ResourceTypeBody body) {
-        var rt = admin.registerResourceType(actor, body.name(), body.ownerService(), body.dimensionSchema());
+        var rt = admin.registerResourceType(actor(request), body.name(), body.ownerService(), body.dimensionSchema());
         return Map.of("name", rt.getName(), "ownerService", String.valueOf(rt.getOwnerService()));
     }
 

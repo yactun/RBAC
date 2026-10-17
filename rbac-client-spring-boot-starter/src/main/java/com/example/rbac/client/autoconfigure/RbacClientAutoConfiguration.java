@@ -9,6 +9,7 @@ import com.example.rbac.client.cache.L2Cache;
 import com.example.rbac.client.cache.RbacL2Redis;
 import com.example.rbac.client.invalidation.InvalidationHandler;
 import com.example.rbac.client.invalidation.InvalidationSubscriber;
+import com.example.rbac.client.security.BearerTokenProvider;
 import com.example.rbac.client.security.UserContextResolver;
 import com.example.rbac.model.UserContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -124,10 +125,25 @@ public class RbacClientAutoConfiguration {
         return (registry == null) ? RbacClientMetrics.NONE : new MicrometerRbacClientMetrics(registry);
     }
 
+    /**
+     * S1 (ADR-002): default {@link BearerTokenProvider} from the
+     * {@code rbac.client.pdp-token} property (static token; dev/test convenience).
+     * A host-provided {@code BearerTokenProvider} bean always wins. Absent both,
+     * no {@code Authorization} header is sent (fine for {@code mode=mesh} /
+     * disabled-auth PDPs).
+     */
+    @Bean
+    @ConditionalOnMissingBean(BearerTokenProvider.class)
+    @ConditionalOnExpression("'${rbac.client.pdp-token:}' != ''")
+    public BearerTokenProvider rbacBearerTokenProvider(RbacClientProperties props) {
+        return () -> props.getPdpToken();
+    }
+
     @Bean
     @ConditionalOnMissingBean(AccessClient.class)
     public AccessClient rbacAccessClient(L1Cache l1,
                                          ObjectProvider<L2Cache> l2,
+                                         ObjectProvider<BearerTokenProvider> token,
                                          RbacClientProperties props,
                                          ObjectMapper json,
                                          RbacClientMetrics metrics) {
@@ -138,11 +154,23 @@ public class RbacClientAutoConfiguration {
                 new org.springframework.http.client.SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(props.getConnectTimeout());
         factory.setReadTimeout(props.getReadTimeout());
-        RestClient rest = RestClient.builder()
+        RestClient.Builder builder = RestClient.builder()
                 .baseUrl(props.getBaseUrl())
-                .requestFactory(factory)
-                .build();
-        return new DefaultAccessClient(l1, l2.getIfAvailable(), rest, json, metrics);
+                .requestFactory(factory);
+        // S1 (ADR-002): present the bearer token to a jwt-mode PDP (no-op for
+        // mesh-mode / disabled-auth PDPs, where a provider is simply absent).
+        BearerTokenProvider provider = token.getIfAvailable();
+        if (provider != null) {
+            builder.requestInterceptor((request, body, execution) -> {
+                String t = provider.bearerToken();
+                if (t != null && !t.isBlank()) {
+                    t = t.trim();
+                    request.getHeaders().set("Authorization", t.startsWith("Bearer ") ? t : "Bearer " + t);
+                }
+                return execution.execute(request, body);
+            });
+        }
+        return new DefaultAccessClient(l1, l2.getIfAvailable(), builder.build(), json, metrics);
     }
 
     @Bean

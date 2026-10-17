@@ -6,9 +6,51 @@
 
 ---
 
-## 0. STATUS — where things stand (2026-10-16, **GREEN — review done; ADR-002 proposed; B2 + Track C (C1/C4/C5a) shipped**)
+## 0. STATUS — where things stand (2026-10-17, **GREEN — ADR-002 Accepted; Track A shipped (S1/T1/S2/R1, A1 descoped); 88 tests**)
 
-**This session (2026-10-16) — implementation-vs-design review + hardening:**
+**This session (2026-10-17) — Track A (ADR-002) implemented; `mvn clean verify` → 88 tests, 0 failures (access-service 72 + starter 16):**
+- **T1 (template = catalog, `ed2d13e`):** `GrantLoader` no longer adds template-element
+  permissions; new idempotent `DELETE /v1/admin/profiles/{name}/templates/{appId}/{name}`
+  (detach, audited, invalidated). Pinned by `RbacResolverTest` + the `decisionFlow` IT
+  round-trip (attach → listed-but-hidden; grant → visible; revoke → hidden again).
+- **S2 (scopes fail-closed + canonical Option A, `2bd63ab`):** `Scope` =
+  `{resourceType, filters:[{dimension, op, values}]}`, closed op set
+  `IN/EQ/GT/GTE/LT/LTE/BETWEEN/ALL`, arity enforced in compact constructors (validated at
+  Jackson (de)serialization → corrupt/stale values fail closed); `values(dim)`/`isAll(dim)`
+  throw `UnknownDimensionException` (unknown dim can never mean "all rows"); `IN []` = deny,
+  `ALL` = all-rows; `RbacResolver` OR-merges per dimension (mixed ops throw — loud 500,
+  never cached); `AdminService.setScope` validates dim-set/ops against the schema (400) +
+  `DELETE …/scopes/{rt}`. New `ScopeTest` (9, in access-service — rbac-model stays
+  dependency-free). Gotchas #14/#26.
+- **R1 + A1 (retention split + provenance; A1 descoped, `6f53a5b`):** `V4__grant_provenance.sql`
+  adds `granted_at`/`granted_by` to `profile_permission`/`profile_scope`/`profile_template`
+  (stamped by `AdminService` — explicit repo `flush()` before the update, for Hibernate join
+  rows); `ops/rotate_audit_partitions.sql` + RUNBOOK split windows (decision 3 mo / change
+  12 mo), verified on real PG16; A1 descoping recorded in DESIGN §8 (no PEP emitter, no new
+  endpoint — raw `/v1/check` + inline `audit.decision` remain).
+- **S1 (S2S auth + actor-from-principal, this session):** config-gated
+  `rbac.pdp.auth.{enabled,mode,admin-authority,admin-principals}` (`enabled` defaults
+  `false` + loud startup WARN — dev/tests unchanged). `mode=mesh`: `MeshAuthFilter` takes
+  the SPIFFE ID from `Forwarded-Client-Cert`; `mode=jwt`: OAuth2 resource server (token
+  `scope`/`scp` → **plain** authorities via prefix-less `JwtGrantedAuthoritiesConverter`).
+  `/v1/admin/**` needs the admin authority (403 non-admin / 401 anonymous); actuator
+  health/info + `/error` stay open. **Actor invariant:** `AuthPrincipal.current()` always
+  uses the verified principal (SPIFFE ID / token `sub`) — `X-Actor` honored **only** in
+  disabled/dev mode. Starter: `BearerTokenProvider` + `rbac.client.pdp-token` →
+  `Authorization: Bearer …` on PDP calls. Pinned by `MeshAuthFilterTest` (5),
+  `AuthPrincipalTest` (3), `AccessServiceAuthMeshTest` (4), `AccessServiceAuthJwtTest` (3,
+  real RSA-signed tokens), `BearerTokenWiringTest` (5, incl. header-on-the-wire via a JDK
+  `HttpServer` fake PDP). **New gotchas #28–#31** (security-chain wiring traps, the
+  `/error` error-dispatch 401-overwrite, `JwtAuthenticationToken` principal = `Jwt` not
+  `sub`, Boot `ManagementWebSecurityAutoConfiguration` vs excluded `SecurityAutoConfiguration`).
+  DESIGN §4/§6/§10 + ADR-002 S1 note updated.
+- **Next (per `REVIEW-implementation-vs-design.md` §4):** Track A is **done** → remaining
+  **Track C** (fresh-replica L2 seed #6, subscriber durability #7, C5b stampede — Caffeine
+  `get(key, loader)`) and **Track D** (profileSet-keyed cache, dedup, 404/409, JSON-escape,
+  bounded `@Async`, catalog, `grantedBy` w/o per-check DB hit, test gaps). **(C6 outbox is
+  DONE — `812b3a3`.)**
+
+**Previously (2026-10-16) — implementation-vs-design review + hardening:**
 - Ran a full **implementation-vs-design review**; every claim verified against source
   (file:line evidence) → `REVIEW-implementation-vs-design.md` (shareable).
 - Drafted **`ADR-002-security-audit-and-semantics.md`** (Status: **Proposed**, pending team
@@ -39,7 +81,7 @@
     read (5s) timeouts (`rbac.client.connect-timeout` / `.read-timeout`) so a hung PDP can't
     hold request threads. (C5's stampede protection — Caffeine `get(key, loader)` — still to do.)
   `mvn clean verify` → **BUILD SUCCESS** (access-service 18 tests, starter 11; total 29).
-- **Next (per `REVIEW-implementation-vs-design.md` §4):** **ADR-002 is now ACCEPTED** (all §7 answered) → implement the gated Track A: **S1** (mesh-mTLS primary / OAuth2 fallback / OIDC admin), **T1** (template = catalog), **S2** (scopes fail-closed + canonical **Option A**), **R1** (1-yr retention + `granted_at`/`granted_by`); **A1 is DESCOPED** (audit = issuance + changes only — no PEP emitter). Then remaining Track C (fresh-replica L2 seed #6, subscriber durability #7, C5b stampede) and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape, bounded @Async, catalog, `grantedBy` w/o per-check DB hit, test gaps). **(C6 outbox is DONE — `812b3a3`.)**
+- **Track A (per `REVIEW-implementation-vs-design.md` §4):** **ADR-002 ACCEPTED** (all §7 answered) → **implemented 2026-10-17** (see the 2026-10-17 entry above): **S1** (mesh-mTLS primary / OAuth2 fallback / OIDC admin), **T1** (template = catalog), **S2** (scopes fail-closed + canonical **Option A**), **R1** (1-yr retention + `granted_at`/`granted_by`); **A1 DESCOPED** (audit = issuance + changes only — no PEP emitter). **(C6 outbox is DONE — `812b3a3`.)**
 - **C6 transactional outbox — IMPLEMENTED (2026-10-16, committed `812b3a3`).** Built exactly
   to the design below; `mvn clean verify` → **BUILD SUCCESS** (access-service 31 tests,
   starter 11; total **42**):
@@ -371,11 +413,14 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
 # PDP:   mvn -pl access-service spring-boot:run   (needs Postgres, Redis, RabbitMQ)
 ```
 
-- **Build status: GREEN (2026-10-15).** `mvn clean verify` → **25 tests, 0
-  failures**: `access-service` 16 (`RbacResolverTest` 7 + `AdminServiceTest` 5 +
-  `AccessServiceIntegrationTest` 4, incl. metrics) and
-  `rbac-client-spring-boot-starter` 9 (`DefaultAccessClientMetricsTest` 5 +
-  `InvalidationSubscriberIntegrationTest` 4).
+- **Build status: GREEN (2026-10-17).** `mvn clean verify` → **88 tests, 0
+  failures**: `access-service` 72 (`ScopeTest` 9 + `RbacResolverTest` 13 +
+  `AdminServiceTest` 16 + `AccessServiceIntegrationTest` 6 + **S1 (2026-10-17):**
+  `MeshAuthFilterTest` 5, `AuthPrincipalTest` 3, `AccessServiceAuthMeshTest` 4,
+  `AccessServiceAuthJwtTest` 3** + `GrantServiceRedisDownTest` 2 + `OutboxServiceTest` 5
+  + `InvalidationRelayTest` 6) and `rbac-client-spring-boot-starter` 16
+  (`DefaultAccessClientMetricsTest` 6 + `RbacClientRedisIsolationTest` 1 +
+  `InvalidationSubscriberIntegrationTest` 4 + **`BearerTokenWiringTest` 5 (S1)**).
 - Integration tests boot the PDP against **real Postgres/Redis/RabbitMQ via
   Testcontainers** (`@Testcontainers(disabledWithoutDocker = true)` — they *skip*,
   not fail, without Docker; gotcha #17).
@@ -568,6 +613,48 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     `RbacResolver.computeUi` stays `visible = permissions.contains(gating)`. Pinned by
     `RbacResolverTest` + the IT `decisionFlow` round-trip (attach → hidden; grant → visible;
     revoke → hidden again).
+28. **S1 (ADR-002): never exclude `SecurityAutoConfiguration`.** The actuator's
+    `ManagementWebSecurityAutoConfiguration` is `@ConditionalOnDefaultWebSecurity` (i.e. it
+    activates exactly when **no** `SecurityFilterChain` bean exists) and needs the
+    `HttpSecurity` bean that `SecurityAutoConfiguration` provides — excluding it makes the
+    context fail to load ("No qualifying bean of type HttpSecurity") in disabled mode.
+    The correct pattern: `SecurityAutoConfiguration` stays active, and the app **always**
+    defines a `SecurityFilterChain` — the secure chain when `rbac.pdp.auth.enabled=true`,
+    an explicit open (`permitAll`) chain when disabled — so both the default form-login
+    chain and the management chain back off. Keep `UserDetailsServiceAutoConfiguration`
+    excluded (kills the generated-user + "Using generated security password" log noise).
+    Also: `AnonymousAuthenticationToken` **requires a non-empty authority list** — use
+    `AuthorityUtils.createAuthorityList("ROLE_ANONYMOUS")` (Spring's own
+    `AnonymousAuthenticationFilter` does the same); `List.of()` throws
+    "authorities cannot be null or empty".
+29. **S1 (ADR-002): `res.sendError(401/403)` triggers a servlet ERROR dispatch to `/error`
+    that re-enters the security chain WITHOUT the original identity.** The synthetic
+    `/error` request has no `Forwarded-Client-Cert`/`Authorization`, so the auth filter
+    re-authenticates it as anonymous, and since `/error` wasn't `permitAll` the chain's own
+    401 **overrode the intended 403** (diagnosed with a filter after
+    `ExceptionTranslationFilter`: `POST /error ctxAuth=AnonymousAuthenticationToken`). Fix:
+    permit `/error` (with actuator health/info) in the chain so the original error status
+    renders unchanged. If you add new error statuses, keep `/error` open.
+30. **S1 (ADR-002): `JwtAuthenticationToken.getPrincipal()` is the `Jwt` object, NOT the
+    `sub` string** (unlike `UsernamePasswordAuthenticationToken` where the principal is the
+    name). `AuthPrincipal.principalName()` must handle both: `String` (mesh SPIFFE ID) and
+    `Jwt` → `jwt.getSubject()`. Related: Spring's default `JwtGrantedAuthoritiesConverter`
+    maps `scope` claim values to `SCOPE_<value>` — the admin matcher wants the plain
+    authority, so `RbacSecurityConfig` wires a converter with `setAuthorityPrefix("")`
+    (`scope=rbac-admin` → authority `rbac-admin`). Both packages are
+    `org.springframework.security.oauth2.server.resource.authentication` (converter) — NOT
+    `org.springframework.security.oauth2.jwt`.
+31. **S1 test/tooling API drift.** (a) nimbus-jose-jwt **9.x**: no static
+    `JWTClaimsSet.builder()` (use `new JWTClaimsSet.Builder()`); it's
+    `RSAKey.toRSAPrivateKey()`/`toRSAPublicKey()` (not `toPrivateRSAKey()`); and
+    `RSAKeyGenerator.generate()`, `RSAKey.toRSA*()`, `SignedJWT.sign()` all throw the
+    **checked** `JOSEException` (wrap in `IllegalStateException` in static init/helpers).
+    (b) `RestClient.Builder` has **no `defaultRequest(RequestCustomizer)`** overload — to
+    set a header on every request use `requestInterceptor(ClientHttpRequestInterceptor)`
+    (3-arg: `(request, body, execution)`; `request.getHeaders().set(...)` then
+    `execution.execute(request, body)`). (c) In `ApplicationContextRunner` tests the
+    autoconfig needs `JacksonAutoConfiguration` added (no Boot web context to provide the
+    `ObjectMapper` bean).
 
 ---
 
@@ -596,13 +683,33 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
   no-op-by-default `RbacClientMetrics` sink (Micrometer optional). Pinned by
   `AccessServiceIntegrationTest.metrics_…` + `DefaultAccessClientMetricsTest`
   (5 tests) + the starter IT adapter assertions.
-- **Partition roll-forward + 3-month retention ops (2026-10-15, committed `d4a6cb6`)** —
+- **Partition roll-forward + retention ops (2026-10-15, committed `d4a6cb6`; split
+  windows per R1 on 2026-10-17)** —
   `ops/rotate_audit_partitions.sql` (idempotent: create next month's partition,
-  drop months older than the rolling 3-month window, never touches `*_default`)
+  drop per-table on the rolling window — `audit_decision` 3 months, `audit_change`
+  12 months — never touches `*_default`)
   + `RUNBOOK-audit-partitions.md` (procedure, archive option, cron, monitoring
-  queries, failure-mode recovery). Both verified on real PostgreSQL 16.15
+  queries, failure-mode recovery). Verified on real PostgreSQL 16.15
   (roll-forward, retention, idempotency, default-partition routing). Fulfills
   D8's "job + runbook"; `V2__audit.sql` header now points to them.
+- **Track A (ADR-002) — DONE (2026-10-17):**
+  - **T1 (committed `ed2d13e`)** — template = layout catalog: `GrantLoader` fixed,
+    idempotent detach endpoint, `decisionFlow` IT pins the attach/grant/revoke round-trip.
+  - **S2 (committed `2bd63ab`)** — scopes fail-closed, canonical Option A: new `Scope`
+    wire format + `UnknownDimensionException`, op-set/arity validation (also at Jackson
+    (de)serialization), OR-merge contract in `RbacResolver`, schema validation + `DELETE
+    …/scopes/{rt}` in `AdminService`, new `ScopeTest` (9).
+  - **R1 + A1 (committed `6f53a5b`)** — `V4__grant_provenance.sql`
+    (`granted_at`/`granted_by` on the 3 live grant tables, stamped in-txn), split
+    retention windows in the ops script + runbook; **A1 descoped** (no PEP emitter /
+    no new endpoint; recorded in DESIGN §8).
+  - **S1 (this session's commit — see git log)** — S2S auth on the PDP:
+    `security/{CallerIdentity, AuthPrincipal, MeshAuthFilter, RbacSecurityConfig,
+    RbacAuthDisabledWarning}`; `rbac.pdp.auth.{enabled,mode,admin-authority,admin-principals}`;
+    actor-always-from-verified-principal in `AdminController`/`DecisionController`;
+    starter `security/BearerTokenProvider` + `rbac.client.pdp-token` + `requestInterceptor`
+    wiring; **20 new tests** (access-service 15 = 8 unit + 7 IT incl. two full-PDP
+    security ITs; starter 5 `BearerTokenWiringTest`). Gotchas #28–#31. 88 tests green.
 
 **Intentionally NOT done (team review completed 2026-10-14 — see §10):**
 - No admin *surface* beyond the JSON API (A5: API/config first — no UI in v1).
@@ -656,21 +763,32 @@ implementation items in §11.
    obsolescence-proofing). PDP + starter instrumented, 9 new tests green (25
    total). See §0 for the exact meter names; gotchas #23/#24 capture the
    Boot-test + Micrometer 1.15 traps.
-5. **DONE (2026-10-15, committed `d4a6cb6`)** — **partition roll-forward +
-   retention (3 months)** ops runbook: `ops/rotate_audit_partitions.sql`
-   (idempotent script) + `RUNBOOK-audit-partitions.md`, verified on real PG 16
-   (see §0).
-6. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
+5. **DONE (2026-10-15, committed `d4a6cb6`; split windows per R1 2026-10-17)** —
+   **partition roll-forward + retention** ops runbook: `ops/rotate_audit_partitions.sql`
+   (idempotent script) + `RUNBOOK-audit-partitions.md`, verified on real PG 16 (see §0).
+6. **DONE (2026-10-17)** — **Track A (ADR-002): S1/T1/S2/R1 implemented, A1 descoped**
+   (`ed2d13e`, `2bd63ab`, `6f53a5b` + this session's S1 commit; see §0/§9).
+7. **NEXT — remaining Track C:** fresh-replica L2 seed (#6), subscriber durability
+   (#7, survive broker restart), C5b stampede protection (Caffeine `get(key, loader)`
+   so concurrent misses fetch once).
+8. **THEN — Track D** (polish, per `REVIEW-implementation-vs-design.md`): profileSet-keyed
+   cache key, decision dedup, 404/409 semantics, JSON-escaping, bounded `@Async`,
+   permission-key catalog/lint, `grantedBy` without a per-check DB hit, remaining test gaps.
+9. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
    (conditional grants). Gated on a team decision; do not build unilaterally.
 
 ---
 
-*Last updated: 2026-10-16 (**ADR-002 ACCEPTED** — team answered all §7: Q1 S1 = K8s mesh-mTLS
-primary / OAuth2 client-credentials fallback / OIDC admin; Q2 T1 = catalog; **Q3 A1 = DESCOPED**
-(audit = issuance + changes only, no PEP emitter — overrides the (a) recommendation); Q4 S2 =
-fail-closed + canonical **Option A**; Q5 R1 = 1-yr `audit_change` retention + `granted_at`/
-`granted_by`. Track A now unblocked: implement S1/T1/S2/R1, A1 descoped).
-Also same day: **C6 transactional outbox IMPLEMENTED** (`V3__outbox.sql` + `OutboxService` +
+*Last updated: 2026-10-17 (**TRACK A (ADR-002) SHIPPED** — S1/T1/S2/R1 implemented, A1 descoped;
+`mvn clean verify` → **88 tests, 0 failures** (access-service 72 + starter 16). Commits: T1
+`ed2d13e`, S2 `2bd63ab`, R1+A1 `6f53a5b`, S1 = this session's commit (see git log). New gotchas
+#28–#31 (S1 security-chain wiring). ADR-002 marked implemented per decision; DESIGN §1/§2/§4/§6/
+§10/§12 + this file in agreement. **Remaining:** Track C #6/#7/C5b, Track D. Prior day 2026-10-16:
+**ADR-002 ACCEPTED** — team answered all §7: Q1 S1 = K8s mesh-mTLS primary / OAuth2
+client-credentials fallback / OIDC admin; Q2 T1 = catalog; **Q3 A1 = DESCOPED** (audit = issuance
++ changes only, no PEP emitter — overrides the (a) recommendation); Q4 S2 = fail-closed + canonical
+**Option A**; Q5 R1 = 1-yr `audit_change` retention + `granted_at`/`granted_by`.
+Also same day (2026-10-16): **C6 transactional outbox IMPLEMENTED** (`V3__outbox.sql` + `OutboxService` +
 `InvalidationRelay` (shared `process` + `@Scheduled` relay + `POST /v1/admin/invalidate`),
 `GrantChangeEvent(long outboxId)`, `AdminService` append-in-txn, new `rbac.pdp.outbox.{pending
 gauge,published,failed}` meters; `OutboxServiceTest` 5 + `InvalidationRelayTest` 6 + 2 new ITs;

@@ -1,6 +1,6 @@
 # User Access Service — Design Document
 
-Status: **v1 (Accepted)** · Scope: RBAC (role/profile-based) · Clients: Java/Spring, stateless · **Decisions accepted by the team 2026-10-14** (ADR-001, status *Accepted*)
+Status: **v1 (Accepted)** · Scope: RBAC (role/profile-based) · Clients: Java/Spring, stateless · **Decisions accepted by the team 2026-10-14** (ADR-001, status *Accepted*) · **ADR-002 (security enforcement + semantics) accepted 2026-10-16 and implemented 2026-10-17** (S1 auth, T1 template catalog, S2 fail-closed scopes, R1 retention/provenance; A1 descoped)
 
 **Stack (confirmed):** Spring Boot 3 (Java 21) · PostgreSQL (system of record + audit) · Redis (shared L2 cache) · RabbitMQ (invalidation bus) · Caffeine (L1) · Flyway.
 
@@ -13,7 +13,7 @@ We have an **identity manager (IDM)** that attaches **profiles** to users. Clien
 1. **Functionality** — "may this user do `X`?" (feature gates in services, tab/element visibility in front-ends).
 2. **Data scope** — "which records may this user see in resource type `R`?" (returned as a filter the client applies to its query).
 
-Non-goals (v1): authentication, user-attribute (ABAC) evaluation, object-graph (ReBAC) checks, multi-tenancy isolation. These are documented as escape hatches in §11.
+Non-goals (v1): *user* authentication/token validation (the client owns it — the PDP does authenticate *service* callers, S1 §10), user-attribute (ABAC) evaluation, object-graph (ReBAC) checks, multi-tenancy isolation. These are documented as escape hatches in §11.
 
 **Design stance:** do *not* reinvent a policy engine. RBAC is a small, well-understood catalog + resolver. We build a thin central **Policy Decision Point (PDP)** and a shared **client starter (PEP helper)**, and we use Spring's built-ins (SpEL only if we later add conditions). We deliberately avoid OPA/Cerbos/Casbin for v1 — that adds engine ops for a requirement that is "a role grants a set of things."
 
@@ -24,7 +24,7 @@ Non-goals (v1): authentication, user-attribute (ABAC) evaluation, object-graph (
 - **A1 — Profile set travels with the request.** The client validates the user token against the IDM, extracts the profile set, and passes it to this service. This service does **not** call the IDM per decision. The client owns all IDM interaction and all enforcement; the PDP stays stateless about identity and therefore does not scale for IDM lookups. (Rejected A1': PDP calling the IDM.) **Team-confirmed 2026-10-14.**
 - **A2 — Pure RBAC.** Grants depend only on the profile set, not on user attributes or request context. Multiple profiles → **union** of grants.
 - **A3 — Per-resource-type scopes (confirmed with constraints).** Each microservice registers its own `resourceType` + the **dimension schema** (the keys it will filter on). The service stores the granted values; the client translates them into its query. **Constraint:** one shared dimension set per resource type (enforced at authoring; see §5.2). **Where the schema lives (team Q, 2026-10-14):** authored as a **YAML manifest in the owning service's repo** and registered into the PDP via the admin API (idempotent upsert); **Postgres stays the runtime source of truth** — the PDP does not read git directly.
-- **A4 — Templates are UI bundles.** A template = a named set of UI-element permission keys for one app. Attaching a template to a profile grants all its element permissions in one move. The front-end owns the actual UI; it only asks "which elements are visible."
+- **A4 — Templates are UI bundles.** A template = a named set of UI-element permission keys for one app. **T1 (ADR-002, 2026-10-16) re-decided this:** a template is a **layout catalog** — attaching it lists the elements (what *may appear*) but **does not grant** their permissions; `visible` stays driven by separately-granted permissions. The front-end owns the actual UI; it only asks "which elements are visible."
 - **A5 — API/config first (confirmed).** No admin UI in v1. An audited admin API is enough to author grants. **Team-confirmed 2026-10-14: API-only for v1.**
 - **A6 — Scale.** ~15,000 users peak, N stateless client replicas. This is small; a single Spring service + PostgreSQL + Caffeine handles it. The only scale concern is **audit write throughput** (handled async).
 - **A7 — Stack.** Spring Boot 3 / Java 21. **PostgreSQL** = system of record + audit. **Redis** = shared L2 cache (from day 1). **RabbitMQ** = invalidation fan-out bus (chosen over Kafka for easier setup; **team-confirmed 2026-10-14** — reuse Kafka only if the platform already runs it). **Caffeine** = L1 in-process cache. **Flyway** for migrations.
@@ -66,6 +66,15 @@ Non-goals (v1): authentication, user-attribute (ABAC) evaluation, object-graph (
 ## 4. Decision contract (API)
 
 Base: `/v1`. All decision endpoints are **idempotent GETs/POSTs** and carry a `version` for cache validation.
+
+> **Authentication (S1, ADR-002 — implemented 2026-10-17):** the PDP enforces service-to-service auth when
+> `rbac.pdp.auth.enabled=true`. `mode=mesh` — identity is the SPIFFE ID the service mesh conveys in
+> `Forwarded-Client-Cert`; `mode=jwt` — a bearer token (OAuth2 client-credentials / OIDC) validated by
+> Spring's resource server. `/v1/admin/**` additionally requires the admin authority
+> (`rbac.pdp.auth.admin-authority`, default `rbac-admin`; mesh: listed in `rbac.pdp.auth.admin-principals`,
+> jwt: the token's `scope`/`scp`). The audit `actor` is **always the verified principal** — the `X-Actor`
+> header is honored **only** when auth is disabled (dev/test default, which logs a loud startup WARN).
+> Actuator `health`/`info` stay open for platform probes. See §10 (Security).
 
 ### 4.1 Check (fast path, single permission)
 
@@ -356,6 +365,7 @@ UiElements ui = access.ui(user, "customers-web");
 
 The starter handles, transparently:
 - HTTP call to **`/v1/grants`** (one call; `check`/`scope`/`ui` are derived locally, ADR D9).
+- **S1 (ADR-002):** presents the service's bearer token to a `mode=jwt` PDP — set `rbac.client.pdp-token` (static, dev/test) or supply a `BearerTokenProvider` bean (token refresh, Vault, client-credentials). No provider → no `Authorization` header (correct for `mode=mesh` / disabled-auth PDPs).
 - **L1 Caffeine** cache keyed by `(userId, profileSet)`, TTL ~60s, validated against `version`.
 - Optional **L2 Redis** shared cache (read-only) + invalidation subscription (§7).
 - **Fail-closed** by default: a genuine fault makes `check` → `allowed=false` (deny) and `scope`/`ui` → **throw** (→ 500), so an unscoped query can never run. A user who simply *lacks* a grant is a **403, not a 500**: `scope` → `AccessDeniedException`, `ui` → empty bundle (nothing visible).
@@ -432,6 +442,13 @@ The `rbac/` resolver is **pure and dependency-free** (profile set in → grants 
 
 ## 10. Non-functional notes
 
+- **Security — S2S auth on the PDP (S1, ADR-002 — implemented 2026-10-17):** the PDP enforces a real trust boundary when `rbac.pdp.auth.enabled=true` (default `false` = fully open, for dev/tests, with a loud startup WARN):
+  - `mode=mesh` — primary on the K8s platform: the mesh authenticates the workload (mTLS) and conveys its **SPIFFE ID** in `Forwarded-Client-Cert`; `MeshAuthFilter` turns that into the principal.
+  - `mode=jwt` — fallback: OAuth2 **client-credentials / OIDC** bearer token; the PDP runs as a resource server (JWKS via `spring.security.oauth2.resourceserver.jwt.*`).
+  - **Admin is separated from decision:** `/v1/admin/**` requires the admin authority (`rbac.pdp.auth.admin-authority`, default `rbac-admin`) — mesh: the SPIFFE ID must be in `rbac.pdp.auth.admin-principals`; jwt: the token must carry it in `scope`/`scp` (mapped to a plain authority). Authenticated non-admin → **403**; no identity → **401**.
+  - **Audit actor = verified principal** (`AuthPrincipal`): `audit_change.actor` is the SPIFFE ID / token subject, **never** the free `X-Actor` header. `X-Actor` is only honored while auth is disabled (dev/test), where it defaults to `"unknown"`.
+  - **Client side:** the starter presents the token via `rbac.client.pdp-token` (static) or a `BearerTokenProvider` bean.
+  - The invariant — verified principal + separated admin authZ + actor-from-principal — holds in every mode; only the token format changes.
 - **Performance:** 15k users is small. L1 TTL absorbs the hot path; the service sees only refetches. `version` keeps revalidation a tiny payload. No sharding needed.
 - **Availability:** fail-closed by default. **A Redis outage is not a hard dependency** (REVIEW #5): the PDP degrades to serving correct grants computed from Postgres (uncached), and the client bypasses the L2 tier and falls through to the PDP — so authorization keeps working when Redis is down. If you need *degraded reads* of a specific scope, the starter can be configured to serve last-known-good with an audit tag — but the default is deny. The starter's PDP calls carry connect (2s) + read (5s) timeouts (`rbac.client.connect-timeout` / `.read-timeout`) so a hung PDP can't hold request threads.
 - **Consistency:** bounded staleness is a documented, accepted property (L1's 60s TTL is the worst-case bound when the bus is down). Grant changes are rare; a user's own revocation should be immediate → the RabbitMQ invalidation event makes it near-instant **while the bus is healthy**. **When the bus is down we deliberately keep TTL-bounded staleness** rather than accelerate invalidation (avoids amplifying load during the outage) — a graceful-degradation choice, team-confirmed 2026-10-14. **Since C6 (2026-10-16) the invalidation is no longer *lost* when the bus is down:** the change commits an outbox row (the "bump + publish is owed" intent) in the same Postgres transaction, and the relay re-drives it the moment the bus is reachable again — so staleness is bounded by the bus-outage duration (TTL remains the safety net), not silently dropped.
@@ -457,3 +474,11 @@ The `rbac/` resolver is **pure and dependency-free** (profile set in → grants 
 5. **Audit store — PostgreSQL** (monthly-partitioned, async writes). No ES/ClickHouse for now. **Retention (split, ADR-002 R1 — confirmed 2026-10-16):** `audit_decision` rolling **3 months** (the 2026-10-14 figure, high-volume table); `audit_change` rolling **12 months** (compliance floor — "who granted this active grant, and when?" must stay answerable); drop/archive partitions per window. Live grant rows also carry `granted_at`/`granted_by` (R1).
 6. **Admin surface — API-only for v1** (confirmed 2026-10-14; no admin UI).
 7. **Scope model — per-resource-type, with the dimension-set constraint** (confirmed 2026-10-14). Schema authored as YAML in the owning service's repo and registered into the PDP; **Postgres is the runtime source of truth**.
+
+**ADR-002 decisions (team-confirmed 2026-10-16, implemented 2026-10-17):**
+
+8. **S1 — Enforce S2S auth on the PDP; actor from the verified principal.** Mesh mTLS + workload identity (primary, K8s), OAuth2 client-credentials/OIDC (fallback); admin endpoints separately authorized; `X-Actor` never trusted while auth is on. Config-gated (`rbac.pdp.auth.{enabled,mode,admin-authority,admin-principals}`), default off for dev.
+9. **T1 — A template is a layout catalog, not a grant-bundle.** Attaching lists elements without granting their permissions; `visible` stays permission-driven; detach endpoint added; revocation is effective.
+10. **S2 — Scopes fail-closed (canonical Option A).** Typed filters with a closed op set; `IN []` = deny; `ALL` = explicit all-rows; unknown dimension/op throws (never "all rows"); `DELETE …/scopes/{rt}` added; authoring validates dimensions/ops against the schema.
+11. **R1 — Retention split + live-grant provenance.** `audit_decision` 3 months, `audit_change` 12 months; `granted_at`/`granted_by` on the live grant rows.
+12. **A1 — DESCOPED.** Decision audit = direct `/v1/check` callers only; the mandated trail is grant issuance + changes (no PEP batch emitter, no new endpoint).

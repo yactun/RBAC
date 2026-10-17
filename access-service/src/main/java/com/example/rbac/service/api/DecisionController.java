@@ -4,6 +4,8 @@ import com.example.rbac.model.UserContext;
 import com.example.rbac.model.dto.CheckRequest;
 import com.example.rbac.model.dto.CheckResult;
 import com.example.rbac.model.dto.GrantSet;
+import com.example.rbac.service.security.AuthPrincipal;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.*;
 
@@ -26,9 +28,14 @@ public class DecisionController {
 
     @PostMapping("/check")
     public CheckResult check(@Valid @RequestBody CheckRequest req,
+                             HttpServletRequest request,
                              @RequestHeader(value = "X-Request-Id", required = false) String requestId,
                              @RequestHeader(value = "X-Service-Name", required = false) String service) {
-        return grantService.check(req.user(), req.key(), requestId, service);
+        // S1 (ADR-002): the trusted caller is the verified principal (mesh SPIFFE ID
+        // or OIDC subject) when PDP auth is enabled; X-Service-Name stays as the
+        // optional, more specific audit label when present.
+        String caller = service != null ? service : AuthPrincipal.current(request).principal();
+        return grantService.check(req.user(), req.key(), requestId, caller);
     }
 
     /** Full grant set for a (userId, profileSet) pair — the single cached unit (ADR D9). */

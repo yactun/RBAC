@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Accepted** (2026-10-16) — all §7 questions answered by the team (see §7 Team-review notes + §9 decision log). Gated implementation (Tracks A/B) may proceed. |
+| **Status** | **Accepted** (2026-10-16) — all §7 questions answered by the team (see §7 Team-review notes + §9 decision log). **S1/T1/S2/R1 implemented 2026-10-17 (A1 descoped)** — build green (88 tests). |
 | **Date** | 2026-10-16 |
 | **Deciders** | Platform / Identity team (+ compliance owner for R1) |
 | **Related** | `ADR-001-user-access-service.md` (superseded-in-part: D4, D8), `DESIGN.md`, `REVIEW-implementation-vs-design.md` (evidence) |
@@ -61,6 +61,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **When to reconsider:** If the platform mandates a specific IdP flow (e.g. SPIFFE workload identity / mTLS-only), conform to it — the *principle* (verified principal + separated admin authZ + actor-from-principal) is the invariant, not the token format.
 - **Open (team):** **Which identity issuer** do we validate against (existing IDM / Keycloak / other), and do we already run a mesh (in which case authN may be mesh-level and we focus on authZ + actor)? *(§7 Q1.)*
 - **✅ Team decision (2026-10-16):** Platform is **Kubernetes**. S2S = **mesh mTLS + workload identity** (primary) with **OAuth2 client-credentials as fallback**; admin via **OIDC**. Implement as a **config-gated, mode-switchable** auth layer (`mesh` | `jwt` | `disabled`) so the PDP works on both paths; the *invariant* (verified principal + separated admin authZ + actor-from-principal) is enforced regardless of mode.
+- **✅ Implemented (2026-10-17):** config-gated on `rbac.pdp.auth.{enabled, mode, admin-authority, admin-principals}` (`enabled` defaults to `false` + a loud startup WARN, so existing deployments/tests are unchanged). `mode=mesh`: `MeshAuthFilter` takes the SPIFFE ID from the mesh's `Forwarded-Client-Cert` header; `mode=jwt`: standard Spring OAuth2 resource server (token `scope`/`scp` values map to **plain** authorities, so `scope=rbac-admin` satisfies the admin matcher). `/v1/admin/**` requires the admin authority (403 for an authenticated non-admin; 401 without identity); actuator health/info + `/error` stay open. The audit actor is **always** the verified principal (`AuthPrincipal`); `X-Actor` is honored **only** in disabled/dev mode. The starter presents `rbac.client.pdp-token` (or a host `BearerTokenProvider` bean) as `Authorization: Bearer …` on every PDP call. Pinned by `MeshAuthFilterTest`, `AuthPrincipalTest`, `AccessServiceAuthMeshTest`, `AccessServiceAuthJwtTest`, `BearerTokenWiringTest` (88-test build green).
 
 ### T1 — A template is a **layout catalog**, not a grant-bundle
 
@@ -78,6 +79,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **When to reconsider:** If the platform must centrally *own and enforce* layout (the D4 reconsider trigger), revisit — but that's a different (bigger) change.
 - **Open (team):** Confirm "catalog, not bundle" as the intended semantics (it matches the existing design example and test). *(§7 Q2.)*
 - **✅ Team decision (2026-10-16): ACCEPTED.** Catalog semantics; attach does not grant. Rationale: *better no data than a data breach — a user who lacks access raises a support ticket.*
+- **✅ Implemented (2026-10-17, `ed2d13e`):** `GrantLoader` no longer adds template-element permissions to the grant set; new `DELETE /v1/admin/profiles/{name}/templates/{appId}/{templateName}` (idempotent detach, audited, invalidates). `RbacResolverTest` + the `decisionFlow` IT pin the full round-trip: attach → element listed but **not** granted (hidden); grant the permission → visible; revoke it → hidden again.
 
 ### A1 — Decision audit lives at the **PEP**; PDP keeps change-audit + grant-issuance
 
@@ -95,6 +97,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **When to reconsider:** If decision volume or the need for streaming analytics grows → switch the transport to an OTLP log stream / Kafka without changing the record shape.
 - **Open (team):** Confirm PEP-side batched decision audit (vs. descoping, vs. OTLP-first). *(§7 Q3.)*
 - **✅ Team decision (2026-10-16): option (c) — DESCOPED.** Audit covers **grant issuance + changes only**, not per-check decisions. This **overrides the (a) recommendation above**. Consequence: **no PEP batch emitter or new `/v1/audit/decision` endpoint is built**; the raw `/v1/check` + its inline `audit.decision` may remain for direct-API callers, and `audit_decision` is no longer a mandated production control. D8↔D9 resolved by choosing D9 (local derivation) and dropping the per-check audit obligation.
+- **✅ Implemented (2026-10-17, `6f53a5b`):** as descoped — nothing built. The raw `/v1/check` + inline `audit.decision` remain for direct-API callers; the descoping is recorded in `DESIGN.md` §8.
 
 ### S2 — Scopes fail-closed: throw on unknown dimension; empty = wildcard; add DELETE
 
@@ -112,6 +115,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **When to reconsider:** If a legitimate "optional dimension" pattern emerges (some callers don't filter on a dimension at all), model it explicitly (e.g. an `ALL` marker value) rather than silently treating absence as all.
 - **Open (team):** Confirm the fail-closed semantics + the breaking change. *(§7 Q4.)*
 - **✅ Team decision (2026-10-16): CONFIRMED, using canonical format Option A.** Typed predicates with a closed op set (`IN/EQ/GT/GTE/LT/LTE/BETWEEN`), flat AND, `IN` empty = deny, explicit `ALL` for all-rows, unknown dim/op = throw. Starter validates the PDP response before any query; the developer owns the final filter mapping.
+- **✅ Implemented (2026-10-17, `2bd63ab`):** `Scope` is now `{resourceType, filters:[{dimension, op, values}]}` with the closed op set (arity enforced in the compact constructors, so Jackson (de)serialization fails closed on a corrupt/stale value); `values(dim)`/`isAll(dim)` throw `UnknownDimensionException` for an undeclared dimension; `IN []` = deny, `ALL` = all-rows; `RbacResolver` OR-merges per dimension (mixed ops throw — a loud 500, never cached); `AdminService.setScope` validates the dimension set + ops against `resource_type.dimension_schema` (400) and `DELETE …/scopes/{rt}` exists. Pinned by `ScopeTest` (9), `RbacResolverTest`, `AdminServiceTest` + ITs.
 
 ### R1 — Retention split: `audit_change` ≥ 1 year, `audit_decision` 3 months; add `granted_at`
 
@@ -128,6 +132,7 @@ Each of these is a **decision** (it changes accepted behavior), not a bug to fix
 - **When to reconsider:** If the compliance owner specifies a different floor (e.g. 7 years for SOX in some scopes), set the `audit_change` window to that.
 - **Open (team/compliance):** Confirm the exact `audit_change` retention floor and whether `granted_by` (actor) is required on the M2M rows. *(§7 Q5.)*
 - **✅ Team decision (2026-10-16): 1-year floor adopted** for `audit_change` (SOX/ISO 27001 norm); `audit_decision` stays 3 months; add `granted_at` + `granted_by` to the live M2M rows.
+- **✅ Implemented (2026-10-17, `6f53a5b`):** `V4__grant_provenance.sql` adds `granted_at`/`granted_by` to `profile_permission`/`profile_scope`/`profile_template` (stamped by `AdminService` on every grant mutation); `ops/rotate_audit_partitions.sql` + `RUNBOOK-audit-partitions.md` now drop on **separate** rolling windows (`audit_decision` 3 months, `audit_change` 12 months), verified on real PostgreSQL 16.
 
 ---
 

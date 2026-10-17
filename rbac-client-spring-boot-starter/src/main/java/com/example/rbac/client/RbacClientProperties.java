@@ -21,6 +21,15 @@ public class RbacClientProperties {
     /** Max entries in the L1 cache. */
     private long l1MaxSize = 20_000;
 
+    /**
+     * S1 (ADR-002): static bearer token sent to the PDP (dev/test convenience for
+     * a {@code mode=jwt} PDP; ignored by a {@code mode=mesh} PDP). Prefer a
+     * {@link com.example.rbac.client.security.BearerTokenProvider} bean in
+     * production (token refresh, Vault, client-credentials flow) — this property
+     * only creates a default provider when no bean is present.
+     */
+    private String pdpToken = null;
+
     /** Enable the RabbitMQ invalidation subscriber (near-instant revocation). */
     private boolean invalidationEnabled = true;
 
@@ -82,6 +91,14 @@ public class RbacClientProperties {
 
     public void setL1MaxSize(long l1MaxSize) {
         this.l1MaxSize = l1MaxSize;
+    }
+
+    public String getPdpToken() {
+        return pdpToken;
+    }
+
+    public void setPdpToken(String pdpToken) {
+        this.pdpToken = pdpToken;
     }
 
     public boolean isInvalidationEnabled() {
