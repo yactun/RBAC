@@ -9,6 +9,7 @@ import com.example.rbac.client.cache.L2Cache;
 import com.example.rbac.client.cache.RbacL2Redis;
 import com.example.rbac.client.invalidation.InvalidationHandler;
 import com.example.rbac.client.invalidation.InvalidationSubscriber;
+import com.example.rbac.model.dto.InvalidationEvent;
 import com.example.rbac.client.security.BearerTokenProvider;
 import com.example.rbac.client.security.UserContextResolver;
 import com.example.rbac.model.UserContext;
@@ -139,7 +140,14 @@ public class RbacClientAutoConfiguration {
         return () -> props.getPdpToken();
     }
 
-    @Bean
+    /**
+     * C2 (REVIEW #6): {@code initMethod="syncVersion"} seeds the client's local policy
+     * version from the PDP at startup ({@link DefaultAccessClient#syncVersion()} is
+     * fail-soft — a PDP that is down at boot only costs its connect timeout and a WARN,
+     * never a failed startup). Covers L1-only hosts too; bus-connected hosts also get a
+     * re-sync on every bus restore (see the {@link InvalidationSubscriber} bean below).
+     */
+    @Bean(initMethod = "syncVersion")
     @ConditionalOnMissingBean(AccessClient.class)
     public AccessClient rbacAccessClient(L1Cache l1,
                                          ObjectProvider<L2Cache> l2,
@@ -196,12 +204,26 @@ public class RbacClientAutoConfiguration {
                 connectionFactory,
                 queue,
                 json,
-                event -> {
-                    metrics.invalidationEvent();
-                    if (accessClient instanceof InvalidationHandler handler) {
-                        handler.onEvent(event);
+                new InvalidationHandler() {
+                    @Override
+                    public void onEvent(InvalidationEvent event) {
+                        metrics.invalidationEvent();
+                        if (accessClient instanceof InvalidationHandler handler) {
+                            handler.onEvent(event);
+                        }
                     }
-                });
+
+                    @Override
+                    public void onBusConnected() {
+                        // C2: the bus just (re)established — the client re-seeds its
+                        // local policy version (fail-soft) so events missed while the
+                        // bus was down are covered.
+                        if (accessClient instanceof InvalidationHandler handler) {
+                            handler.onBusConnected();
+                        }
+                    }
+                },
+                metrics);
     }
 
     @Bean

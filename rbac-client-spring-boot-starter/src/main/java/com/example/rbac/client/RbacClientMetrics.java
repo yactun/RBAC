@@ -40,4 +40,11 @@ public interface RbacClientMetrics {
 
     /** Record an invalidation event received from the bus. */
     default void invalidationEvent() { }
+
+    /**
+     * Record the state of the invalidation bus connection (initial report or a
+     * transition). {@code false} means the bus is currently unreachable — the
+     * replica is degrading to its TTL-bounded staleness until it reconnects.
+     */
+    default void busState(boolean active) { }
 }

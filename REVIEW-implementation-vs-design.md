@@ -129,12 +129,12 @@ Two rules shape the order (both from the repo's own discipline): (1) **ADR-gated
 - **B1 = ADR-002 S1** code: `spring-security` + OAuth2 resource server; separate authority for `/v1/admin/**`; actor from the verified principal. *Gated on Q1 (which IdP).*
 - **B2 — Starter Redis isolation** (decision-agnostic; **implemented this turn**): dedicated `rbac.client.redis.*` connection so the client never reads L2 from the host's app Redis; document a read-only ACL on `rbac:grants:*` as a deployment requirement. Fixes #9.
 
-### Track C — Availability & correctness (mostly code, no decision)
-- **C1** bypass a cache tier on error; PDP serves from Postgres with a short-cached low version (#5).
-- **C2** seed `localVersion` from `/v1/version` at startup + on bus reconnect (#6).
-- **C3** make the subscriber's `RabbitAdmin`+container beans, `setAmqpAdmin`, add a lost-bus metric + broker-restart test (#7).
-- **C4** delete (or TTL + `x-max-length`) the durable `pdpManagementQueue` (#8).
-- **C5** timeouts + Caffeine `get(key, loader)` stampede protection + optional breaker (#10).
+### Track C — Availability & correctness (mostly code, no decision) — **DONE (2026-10-19)**
+- **C1** bypass a cache tier on error; PDP serves from Postgres with a short-cached low version (#5). **Done 2026-10-16.**
+- **C2** seed `localVersion` from `/v1/version` at startup + on bus reconnect (#6). **Done 2026-10-19.**
+- **C3** subscriber survives bus loss: missing queue non-fatal + re-declared + lost-bus metric + loss/recovery test (#7). **Done 2026-10-19.**
+- **C4** delete (or TTL + `x-max-length`) the durable `pdpManagementQueue` (#8). **Done 2026-10-16.**
+- **C5** timeouts (C5a) + Caffeine `get(key, loader)` stampede protection (C5b) + optional breaker (#10). **C5a done 2026-10-16, C5b done 2026-10-19** (breaker deliberately not added — the coalesced fetch already bounds amplification).
 - **C6** **transactional outbox now** (removes the "lost invalidation" foot-gun C1–C3 all touch); at minimum `POST /v1/admin/invalidate`. **Done 2026-10-16** — see §6.
 
 ### Track D — Correctness cleanups + the big cache win
@@ -169,5 +169,10 @@ Two rules shape the order (both from the repo's own discipline): (1) **ADR-gated
   - **C4 (durable-queue leak, #8):** the un-consumed `pdpManagementQueue` is now bounded (TTL + max-length).
   - **C5a (timeouts, #10):** the starter's PDP `RestClient` has connect (2s) + read (5s) timeouts. (C5b stampede protection still to do.)
 - **Track C — C6 (transactional outbox, removes the "lost invalidation" foot-gun):** `V3__outbox.sql` (`outbox_invalidation`) + `OutboxService` (`append()` in-txn, atomic `tryClaim()` lease, `pending()`, `pendingIds()`) + `InvalidationRelay` (shared `process()` = claim→bump→publish→mark, `@Scheduled(fixedDelay=1s)` durable relay, `forceInvalidate()` escape hatch). `AdminService` writes the outbox intent in the same txn as the grant change; `InvalidationOnCommit` delegates to the relay; `GrantChangeEvent` carries the outbox id; `POST /v1/admin/invalidate` added. New meters `rbac.pdp.outbox.{pending gauge,published,failed}` (replacing `rbac.pdp.invalidation.{lost,published}`). Tests: `OutboxServiceTest` (5, real-Postgres atomic claim under concurrency) + `InvalidationRelayTest` (6, unit) + 2 new ITs. `mvn clean verify` GREEN (42 tests).
+- **Track C remainder — C2, C3, C5b (client resilience, done 2026-10-19):**
+  - **C2 (#6 fresh-replica L2 seed):** `DefaultAccessClient.syncVersion()` seeds the local policy version from `GET /v1/version` (fail-soft, monotonic); wired as the client bean's `initMethod` (startup, covers L1-only hosts) and on every bus restore via the new `InvalidationHandler.onBusConnected()` default. A stale L2 entry can no longer be served by a fresh replica. Tests: `DefaultAccessClientVersionSyncTest` (4, incl. a control test pinning the old hole).
+  - **C3 (#7 subscriber durability):** the subscriber's listener container now runs with `missingQueuesFatal=false` + `setAmqpAdmin`, and a lightweight monitor thread re-declares the per-instance auto-delete queue + binding while the consumer is down (spring-rabbit's built-in re-declaration requires an `ApplicationContext`, which this standalone container has none — gotcha #32). Outage/restored transitions are alarmed via new `rbac.client.bus.up` gauge + `rbac.client.bus.lost` counter, and the handler is asked to re-sync on restore. Test: `InvalidationSubscriberReconnectTest` (real RabbitMQ — the queue is deleted out from under a live consumer, which is the exact end state of a broker restart, without Testcontainers' restart-port flake).
+  - **C5b (#10 stampede):** `L1Cache.getOrLoad` (Caffeine per-key locking) coalesces concurrent L1 misses for the same key into a single PDP fetch; fail-closed preserved (a loader failure stores nothing). Test: `L1CacheCoalescingTest` (16 concurrent cold misses → exactly 1 fetch).
+  `mvn clean verify` GREEN — **94 tests** (access-service 72 + starter 22).
 
-**Not yet started (needs the ADR or is next):** B1 (auth, gated on Q1); the rest of Track C (#6 fresh-replica L2 seed, #7 subscriber durability, C5b stampede); and Track D (profileSet-keyed cache, dedup, 404/409, JSON-escape, bounded `@Async`, explicit catalog, `grantedBy` without a per-check DB hit, the §3 test gaps). Each is a self-contained, testable increment.
+**Not yet started:** Track D (D1 profileSet-keyed cache — shared `CacheKeys` contract, do deliberately; D2 dedup/404-409/JSON-escape/bounded-`@Async`/explicit catalog/`grantedBy` without a per-check DB hit; D3 the §3 test gaps; D4 optional). Each is a self-contained, testable increment. (Track A done 2026-10-17; Track C done 2026-10-19.)

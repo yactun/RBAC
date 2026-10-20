@@ -8,6 +8,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import java.time.Duration;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * L1 in-process cache (Caffeine). Per-replica, bounded by TTL (ADR D5, D10).
@@ -30,6 +31,17 @@ public class L1Cache {
 
     public void put(String userId, Set<String> profiles, GrantSet grantSet) {
         cache.put(CacheKeys.grantsKey(userId, profiles), grantSet);
+    }
+
+    /**
+     * Load-on-miss with Caffeine's per-key locking (C5b, stampede protection):
+     * concurrent misses for the same key coalesce into a single {@code loader}
+     * execution — the first caller runs it, the others block and receive its
+     * result. A loader failure stores nothing and propagates to every waiter
+     * (fail-closed is preserved).
+     */
+    public GrantSet getOrLoad(String userId, Set<String> profiles, Supplier<GrantSet> loader) {
+        return cache.get(CacheKeys.grantsKey(userId, profiles), key -> loader.get());
     }
 
     /** Drop a single user's entry (scoped invalidation). */

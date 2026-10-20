@@ -17,11 +17,13 @@ import java.time.Duration;
  *   <li>{@code rbac.client.decision} timer — tags {@code operation} (check|scope|ui|grants), {@code source} (l1|l2|pdp|error)</li>
  *   <li>{@code rbac.client.pdp.fetch} counter — tag {@code success} (true|false)</li>
  *   <li>{@code rbac.client.invalidation.events} counter</li>
+ *   <li>{@code rbac.client.bus.up} gauge (1|0) + {@code rbac.client.bus.lost} counter (bus-outage alarm)</li>
  * </ul>
  */
 public final class MicrometerRbacClientMetrics implements RbacClientMetrics {
 
     private final MeterRegistry registry;
+    private volatile boolean busUp;
 
     public MicrometerRbacClientMetrics(MeterRegistry registry) {
         this.registry = registry;
@@ -46,5 +48,14 @@ public final class MicrometerRbacClientMetrics implements RbacClientMetrics {
     @Override
     public void invalidationEvent() {
         registry.counter("rbac.client.invalidation.events").increment();
+    }
+
+    @Override
+    public void busState(boolean active) {
+        this.busUp = active;
+        registry.gauge("rbac.client.bus.up", this, m -> m.busUp ? 1 : 0);
+        if (!active) {
+            registry.counter("rbac.client.bus.lost").increment();
+        }
     }
 }

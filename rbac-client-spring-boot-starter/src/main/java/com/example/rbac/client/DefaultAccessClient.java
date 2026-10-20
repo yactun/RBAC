@@ -163,14 +163,20 @@ public class DefaultAccessClient implements AccessClient, InvalidationHandler {
             }
         }
 
+        // C5b (REVIEW #10): coalesce concurrent L1 misses for the same key into ONE
+        // PDP fetch — Caffeine's per-key locking runs the loader once and hands the
+        // result to every waiter. A loader failure stores nothing and propagates to
+        // all waiters (fail-closed preserved).
         try {
-            g = fetchFromPdp(user);
+            g = l1.getOrLoad(user.userId(), user.profiles(), () -> {
+                GrantSet fetched = fetchFromPdp(user);
+                metrics.pdpFetch(true); // inside the loader: counted once per real fetch
+                return fetched;
+            });
         } catch (RuntimeException e) {
             metrics.pdpFetch(false);
             throw e;
         }
-        metrics.pdpFetch(true);
-        l1.put(user.userId(), user.profiles(), g);
         return new Resolved(g, "pdp");
     }
 
@@ -197,6 +203,33 @@ public class DefaultAccessClient implements AccessClient, InvalidationHandler {
         // precise key; clearing L1 is the safe, simple choice (L1 is small and
         // per-replica). The next read refetches and revalidates the version.
         l1.clear();
+    }
+
+    /**
+     * C2 (REVIEW #6): seed/refresh the local policy version from the PDP's lightweight
+     * {@code GET /v1/version} probe. A fresh replica starts at version 0 and would
+     * otherwise accept a stale L2 entry (written before its first invalidation event);
+     * seeding the real version makes the existing {@code g.version() >= localVersion}
+     * check reject it and refetch. Monotonic (max), and fail-soft: if the PDP is
+     * unreachable the current version is kept (TTL remains the safety net).
+     */
+    public void syncVersion() {
+        try {
+            Map<String, Object> body = rest.get().uri("/v1/version").retrieve().body(Map.class);
+            Object v = (body == null) ? null : body.get("version");
+            if (v instanceof Number n) {
+                localVersion.accumulateAndGet(n.longValue(), Math::max);
+            }
+        } catch (RuntimeException e) {
+            log.warn("Version sync from PDP failed; keeping local version: {}", e.toString());
+        }
+    }
+
+    @Override
+    public void onBusConnected() {
+        // The bus just (re)established: any events missed while it was down are
+        // covered by re-seeding the local version from the PDP (fail-soft).
+        syncVersion();
     }
 
     /** The resolved grant set plus the tier that served it (l1|l2|pdp), for the decision metric. */

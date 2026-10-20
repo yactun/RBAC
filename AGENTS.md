@@ -6,9 +6,40 @@
 
 ---
 
-## 0. STATUS — where things stand (2026-10-17, **GREEN — ADR-002 Accepted; Track A shipped (S1/T1/S2/R1, A1 descoped); 88 tests**)
+## 0. STATUS — where things stand (2026-10-19, **GREEN — ADR-002 Accepted; Track A + Track C shipped; 94 tests**)
 
-**This session (2026-10-17) — Track A (ADR-002) implemented; `mvn clean verify` → 88 tests, 0 failures (access-service 72 + starter 16):**
+**This session (2026-10-19) — Track C remainder (C2/C3/C5b, client resilience); `mvn clean verify` → 94 tests, 0 failures (access-service 72 + starter 22):**
+- **C2 (fresh-replica L2 seed, #6):** `DefaultAccessClient.syncVersion()` seeds the local
+  policy version from `GET /v1/version` (fail-soft, monotonic max) — wired as the client
+  bean's `initMethod` (startup, covers L1-only hosts) and on **every bus restore** via the
+  new `InvalidationHandler.onBusConnected()` default (called by the subscriber's monitor).
+  A fresh replica (localVersion=0) can no longer accept a stale L2 entry: the existing
+  `entry.version >= localVersion` check rejects it and refetches. New
+  `DefaultAccessClientVersionSyncTest` (4, incl. a control test pinning the old hole).
+- **C3 (subscriber durability, #7):** the per-instance invalidation queue is **auto-delete**
+  — it vanishes with the connection on a broker restart. `InvalidationSubscriber` now runs
+  the listener container with `missingQueuesFatal=false` + `setAmqpAdmin`, and a
+  lightweight **monitor thread** (2 s) re-declares the queue + binding while the consumer
+  is down, alarms transitions (`rbac.client.bus.up` gauge / `rbac.client.bus.lost` counter
+  on the new `RbacClientMetrics.busState` default), and asks the handler to re-sync on
+  restore. New `InvalidationSubscriberReconnectTest` (real RabbitMQ: queue deleted out from
+  under a live consumer — the exact end state of a broker restart — then re-declared,
+  re-subscribed, and an event delivered; a container-restart IT is deliberately avoided,
+  see the test Javadoc). **Gotcha #32** (spring-rabbit 3.2.12 recovery semantics).
+- **C5b (stampede protection, #10):** `L1Cache.getOrLoad` (Caffeine per-key locking)
+  coalesces concurrent L1 misses for the same key into a **single** PDP fetch; a loader
+  failure stores nothing and propagates to all waiters (fail-closed preserved).
+  `resolve()` now uses it for the PDP tail; `pdpFetch(true)` is counted inside the loader
+  (once per real fetch). New `L1CacheCoalescingTest` (16 concurrent cold misses → exactly
+  1 fetch).
+- **Next (per `REVIEW-implementation-vs-design.md` §4):** Track A **done**, Track C **done**
+  → remaining **Track D**: **D1** profileSet-keyed cache (shared `CacheKeys` contract — do
+  deliberately, PDP + starter in lockstep, gotcha #3), **D2** cleanups (dedup, value-type
+  validation, explicit permission catalog, `grantedBy` w/o per-check DB hit, 404/409,
+  bounded `@Async`, JSON-escape, drop dead `GrantService.scope()/ui()`), **D3** §3 test
+  gaps, **D4** optional (pg_partman+pg_cron, OTel spans, localVersion-lag gauge).
+
+**Previously (2026-10-17) — Track A (ADR-002) implemented; `mvn clean verify` → 88 tests, 0 failures (access-service 72 + starter 16):**
 - **T1 (template = catalog, `ed2d13e`):** `GrantLoader` no longer adds template-element
   permissions; new idempotent `DELETE /v1/admin/profiles/{name}/templates/{appId}/{name}`
   (detach, audited, invalidated). Pinned by `RbacResolverTest` + the `decisionFlow` IT
@@ -413,14 +444,16 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
 # PDP:   mvn -pl access-service spring-boot:run   (needs Postgres, Redis, RabbitMQ)
 ```
 
-- **Build status: GREEN (2026-10-17).** `mvn clean verify` → **88 tests, 0
+- **Build status: GREEN (2026-10-19).** `mvn clean verify` → **94 tests, 0
   failures**: `access-service` 72 (`ScopeTest` 9 + `RbacResolverTest` 13 +
   `AdminServiceTest` 16 + `AccessServiceIntegrationTest` 6 + **S1 (2026-10-17):**
   `MeshAuthFilterTest` 5, `AuthPrincipalTest` 3, `AccessServiceAuthMeshTest` 4,
   `AccessServiceAuthJwtTest` 3** + `GrantServiceRedisDownTest` 2 + `OutboxServiceTest` 5
-  + `InvalidationRelayTest` 6) and `rbac-client-spring-boot-starter` 16
+  + `InvalidationRelayTest` 6) and `rbac-client-spring-boot-starter` 22
   (`DefaultAccessClientMetricsTest` 6 + `RbacClientRedisIsolationTest` 1 +
-  `InvalidationSubscriberIntegrationTest` 4 + **`BearerTokenWiringTest` 5 (S1)**).
+  `InvalidationSubscriberIntegrationTest` 4 + `BearerTokenWiringTest` 5 +
+  **Track C (2026-10-19):** `DefaultAccessClientVersionSyncTest` 4 (C2),
+  `InvalidationSubscriberReconnectTest` 1 (C3), `L1CacheCoalescingTest` 1 (C5b)).
 - Integration tests boot the PDP against **real Postgres/Redis/RabbitMQ via
   Testcontainers** (`@Testcontainers(disabledWithoutDocker = true)` — they *skip*,
   not fail, without Docker; gotcha #17).
@@ -655,6 +688,21 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     `execution.execute(request, body)`). (c) In `ApplicationContextRunner` tests the
     autoconfig needs `JacksonAutoConfiguration` added (no Boot web context to provide the
     `ObjectMapper` bean).
+32. **C3 (REVIEW #7): spring-rabbit 3.2.12 will NOT re-declare a standalone container's
+    auto-delete queue on its own.** `SimpleMessageListenerContainer`'s recovery is an
+    unbounded consumer-restart loop (default `FixedBackOff(5 s, UNLIMITED)`), but two
+    traps: (a) `missingQueuesFatal` defaults to **true** — the first missing queue
+    ABORTS the consumer (fatal), so a standalone subscriber with an auto-delete queue
+    must set `setMissingQueuesFatal(false)`; (b) the built-in `redeclareElementsIfNecessary()`
+    is a **no-op without an `ApplicationContext`** (its re-declare path is
+    `if (context != null)`), and the starter's container has none — so something must
+    re-declare the queue + binding itself (the subscriber's monitor thread does, every
+    2 s while the consumer count is 0). Don't "simplify" away the monitor or the
+    non-fatal flag: without both, the subscriber is permanently dead after one broker
+    restart. Pinned by `InvalidationSubscriberReconnectTest`. Related test trap:
+    Testcontainers `RabbitMQContainer` **re-maps ports on `restart()`**, which would
+    leave the `@ServiceConnection`-wired context on a dead port — that's why the IT
+    deletes the queue out from under a live consumer instead (same end state, no flake).
 
 ---
 
@@ -710,6 +758,20 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     starter `security/BearerTokenProvider` + `rbac.client.pdp-token` + `requestInterceptor`
     wiring; **20 new tests** (access-service 15 = 8 unit + 7 IT incl. two full-PDP
     security ITs; starter 5 `BearerTokenWiringTest`). Gotchas #28–#31. 88 tests green.
+
+- **Track C remainder — DONE (2026-10-19):**
+  - **C2 (fresh-replica L2 seed, #6)** — `DefaultAccessClient.syncVersion()` (GET
+    `/v1/version`, fail-soft, monotonic) as the client bean's `initMethod` + on every
+    bus restore via `InvalidationHandler.onBusConnected()`; fresh replicas no longer
+    accept stale L2. `DefaultAccessClientVersionSyncTest` (4).
+  - **C3 (subscriber durability, #7)** — `missingQueuesFatal=false` + `setAmqpAdmin` +
+    a 2 s monitor that re-declares the auto-delete queue while the consumer is down,
+    alarms `rbac.client.bus.up`/`.lost` (new `RbacClientMetrics.busState`), and
+    re-syncs the handler on restore. `InvalidationSubscriberReconnectTest` (real
+    RabbitMQ; queue deleted out from under a live consumer). Gotcha #32.
+  - **C5b (stampede protection, #10)** — `L1Cache.getOrLoad` (Caffeine per-key
+    locking) coalesces concurrent cold misses into one PDP fetch; fail-closed kept.
+    `L1CacheCoalescingTest` (16 concurrent → 1 fetch). **94 tests green.**
 
 **Intentionally NOT done (team review completed 2026-10-14 — see §10):**
 - No admin *surface* beyond the JSON API (A5: API/config first — no UI in v1).
@@ -768,18 +830,26 @@ implementation items in §11.
    (idempotent script) + `RUNBOOK-audit-partitions.md`, verified on real PG 16 (see §0).
 6. **DONE (2026-10-17)** — **Track A (ADR-002): S1/T1/S2/R1 implemented, A1 descoped**
    (`ed2d13e`, `2bd63ab`, `6f53a5b` + this session's S1 commit; see §0/§9).
-7. **NEXT — remaining Track C:** fresh-replica L2 seed (#6), subscriber durability
-   (#7, survive broker restart), C5b stampede protection (Caffeine `get(key, loader)`
-   so concurrent misses fetch once).
-8. **THEN — Track D** (polish, per `REVIEW-implementation-vs-design.md`): profileSet-keyed
-   cache key, decision dedup, 404/409 semantics, JSON-escaping, bounded `@Async`,
-   permission-key catalog/lint, `grantedBy` without a per-check DB hit, remaining test gaps.
+7. **DONE (2026-10-19)** — **Track C remainder: C2/C3/C5b** (fresh-replica L2 seed #6,
+   subscriber durability #7, stampede protection #10). See §0/§9; gotcha #32.
+8. **NEXT — Track D** (per `REVIEW-implementation-vs-design.md` §4): **D1** profileSet-keyed
+   cache key (shared `CacheKeys` contract — PDP + starter in lockstep, gotcha #3), then
+   **D2** (scope dedup, value-type validation, explicit permission catalog, `grantedBy`
+   without a per-check DB hit, 404/409 semantics, bounded `@Async`, JSON-escape the
+   change-audit fields, drop dead `GrantService.scope()/ui()`), then **D3** (the §3 test
+   gaps), **D4** optional (pg_partman+pg_cron, OTel tracing spans, `localVersion`-lag gauge).
 9. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
    (conditional grants). Gated on a team decision; do not build unilaterally.
 
 ---
 
-*Last updated: 2026-10-17 (**TRACK A (ADR-002) SHIPPED** — S1/T1/S2/R1 implemented, A1 descoped;
+*Last updated: 2026-10-19 (**TRACK C REMAINDER SHIPPED** — C2 fresh-replica L2 seed,
+C3 subscriber durability (monitor + non-fatal missing queues + `rbac.client.bus.*`
+meters), C5b stampede protection (Caffeine per-key locking); `mvn clean verify` →
+**94 tests, 0 failures** (access-service 72 + starter 22). New gotcha #32 (spring-rabbit
+3.2.12 recovery semantics). DESIGN §7 + §10 and `REVIEW-implementation-vs-design.md` §4/§6
+in agreement; Track A + Track C done, **remaining: Track D (D1 profileSet keying →
+D2 → D3 → D4 optional)**. Prior 2026-10-17: **TRACK A (ADR-002) SHIPPED** — S1/T1/S2/R1 implemented, A1 descoped;
 `mvn clean verify` → **88 tests, 0 failures** (access-service 72 + starter 16). Commits: T1
 `ed2d13e`, S2 `2bd63ab`, R1+A1 `6f53a5b`, S1 `12d9d8c`. New gotchas
 #28–#31 (S1 security-chain wiring). ADR-002 marked implemented per decision; DESIGN §1/§2/§4/§6/
