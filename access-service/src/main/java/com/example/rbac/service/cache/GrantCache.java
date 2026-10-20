@@ -28,8 +28,8 @@ public class GrantCache {
         this.ttl = ttl;
     }
 
-    public GrantSet get(String userId, Set<String> profiles) {
-        String raw = redis.opsForValue().get(CacheKeys.grantsKey(userId, profiles));
+    public GrantSet get(Set<String> profiles) {
+        String raw = redis.opsForValue().get(CacheKeys.grantsKey(profiles));
         if (raw == null) {
             return null;
         }
@@ -40,15 +40,15 @@ public class GrantCache {
         }
     }
 
-    public void put(String userId, Set<String> profiles, GrantSet grantSet) {
+    public void put(Set<String> profiles, GrantSet grantSet) {
         try {
-            redis.opsForValue().set(CacheKeys.grantsKey(userId, profiles), json.writeValueAsString(grantSet), ttl);
+            redis.opsForValue().set(CacheKeys.grantsKey(profiles), json.writeValueAsString(grantSet), ttl);
         } catch (Exception e) {
             throw new IllegalStateException("Failed to write grant cache", e);
         }
     }
 
-    public void evict(String userId, Set<String> profiles) {
-        redis.delete(CacheKeys.grantsKey(userId, profiles));
+    public void evict(Set<String> profiles) {
+        redis.delete(CacheKeys.grantsKey(profiles));
     }
 }

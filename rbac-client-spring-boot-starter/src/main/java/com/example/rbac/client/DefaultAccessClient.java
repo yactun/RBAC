@@ -138,7 +138,10 @@ public class DefaultAccessClient implements AccessClient, InvalidationHandler {
     private Resolved resolve(UserContext user) {
         long current = localVersion.get();
 
-        GrantSet g = l1.get(user.userId(), user.profiles());
+        // D1 (REVIEW): the GrantSet is a pure function of the profile set (pure RBAC,
+        // ADR D1/D2) — the cache is keyed on the profile set, not the user. userId is
+        // still sent to the PDP for AUDIT; it is deliberately excluded from the key.
+        GrantSet g = l1.get(user.profiles());
         if (g != null && g.version() >= current) {
             metrics.cache("l1", "hit");
             return new Resolved(g, "l1");
@@ -147,9 +150,9 @@ public class DefaultAccessClient implements AccessClient, InvalidationHandler {
 
         if (l2 != null) {
             try {
-                g = l2.get(user.userId(), user.profiles());
+                g = l2.get(user.profiles());
                 if (g != null && g.version() >= current) {
-                    l1.put(user.userId(), user.profiles(), g);
+                    l1.put(user.profiles(), g);
                     metrics.cache("l2", "hit");
                     return new Resolved(g, "l2");
                 }
@@ -168,7 +171,7 @@ public class DefaultAccessClient implements AccessClient, InvalidationHandler {
         // result to every waiter. A loader failure stores nothing and propagates to
         // all waiters (fail-closed preserved).
         try {
-            g = l1.getOrLoad(user.userId(), user.profiles(), () -> {
+            g = l1.getOrLoad(user.profiles(), () -> {
                 GrantSet fetched = fetchFromPdp(user);
                 metrics.pdpFetch(true); // inside the loader: counted once per real fetch
                 return fetched;

@@ -306,8 +306,8 @@ class AccessServiceIntegrationTest {
 
         // L2: the PDP wrote the GrantSet under the shared key scheme — the same
         // key the starter's L2Cache reads (regression guard on the shared contract).
-        assertThat(grantCache.get("u-1", profiles)).as("L2 hit via GrantCache").isNotNull();
-        assertThat(redisTemplate.opsForValue().get(CacheKeys.grantsKey("u-1", profiles)))
+        assertThat(grantCache.get(profiles)).as("L2 hit via GrantCache").isNotNull();
+        assertThat(redisTemplate.opsForValue().get(CacheKeys.grantsKey(profiles)))
                 .as("L2 value present at the shared CacheKeys key in Redis").isNotNull();
 
         // Decision audit is async -> poll for both check rows

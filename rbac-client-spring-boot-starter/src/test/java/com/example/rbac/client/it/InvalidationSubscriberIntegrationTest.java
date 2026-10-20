@@ -109,8 +109,8 @@ class InvalidationSubscriberIntegrationTest {
     void invalidationEventOnBus_clearsClientL1() throws Exception {
         // Warm L1 the way DefaultAccessClient does after a PDP fetch
         GrantSet grantSet = new GrantSet(List.of("orders:create"), Map.of(), Map.of(), 1L);
-        l1.put("u-1", Set.of("ops"), grantSet);
-        assertThat(l1.get("u-1", Set.of("ops"))).isSameAs(grantSet);
+        l1.put(Set.of("ops"), grantSet);
+        assertThat(l1.get(Set.of("ops"))).isSameAs(grantSet);
 
         // Wait until the subscriber has a live consumer, so the publish below
         // cannot be dropped by the auto-delete queue.
@@ -125,7 +125,7 @@ class InvalidationSubscriberIntegrationTest {
 
         // The subscriber must raise the local version and clear L1
         Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertThat(l1.get("u-1", Set.of("ops"))).as("L1 evicted by the bus event").isNull());
+                assertThat(l1.get(Set.of("ops"))).as("L1 evicted by the bus event").isNull());
 
         // ...and the event must be counted (SLO/ops evidence)
         Counter events = registry.get("rbac.client.invalidation.events").counter();
@@ -137,10 +137,10 @@ class InvalidationSubscriberIntegrationTest {
     void l2ReadUsesTheSharedCacheKeyScheme() throws Exception {
         GrantSet grantSet = new GrantSet(List.of("orders:create"), Map.of(), Map.of(), 7L);
         // Write as the PDP does (shared key scheme + JSON body)
-        redisTemplate.opsForValue().set(CacheKeys.grantsKey("u-9", Set.of("ops")),
+        redisTemplate.opsForValue().set(CacheKeys.grantsKey(Set.of("ops")),
                 json.writeValueAsString(grantSet));
         // The starter must read it back from that exact key
-        assertThat(l2.get("u-9", Set.of("ops"))).as("L2 read at the shared CacheKeys key").isEqualTo(grantSet);
+        assertThat(l2.get(Set.of("ops"))).as("L2 read at the shared CacheKeys key").isEqualTo(grantSet);
     }
 
     private boolean consumerOnQueue() {

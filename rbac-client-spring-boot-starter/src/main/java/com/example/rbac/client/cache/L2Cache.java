@@ -22,8 +22,8 @@ public class L2Cache {
         this.json = json;
     }
 
-    public GrantSet get(String userId, Set<String> profiles) {
-        String raw = redis.opsForValue().get(CacheKeys.grantsKey(userId, profiles));
+    public GrantSet get(Set<String> profiles) {
+        String raw = redis.opsForValue().get(CacheKeys.grantsKey(profiles));
         if (raw == null) {
             return null;
         }

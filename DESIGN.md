@@ -366,7 +366,7 @@ UiElements ui = access.ui(user, "customers-web");
 The starter handles, transparently:
 - HTTP call to **`/v1/grants`** (one call; `check`/`scope`/`ui` are derived locally, ADR D9).
 - **S1 (ADR-002):** presents the service's bearer token to a `mode=jwt` PDP — set `rbac.client.pdp-token` (static, dev/test) or supply a `BearerTokenProvider` bean (token refresh, Vault, client-credentials). No provider → no `Authorization` header (correct for `mode=mesh` / disabled-auth PDPs).
-- **L1 Caffeine** cache keyed by `(userId, profileSet)`, TTL ~60s, validated against `version`.
+- **L1 Caffeine** cache keyed by the **profile set** (D1, 2026-10-20 — the `GrantSet` is a pure function of the profiles, so users sharing a profile set share one entry), TTL ~60s, validated against `version`.
 - Optional **L2 Redis** shared cache (read-only) + invalidation subscription (§7).
 - **Fail-closed** by default: a genuine fault makes `check` → `allowed=false` (deny) and `scope`/`ui` → **throw** (→ 500), so an unscoped query can never run. A user who simply *lacks* a grant is a **403, not a 500**: `scope` → `AccessDeniedException`, `ui` → empty bundle (nothing visible).
 
@@ -385,6 +385,8 @@ Because clients are stateless and multi-replica, a purely local cache fragments.
 **Read path (starter):** `L1 (Caffeine)` → miss → `L2 (Redis GET)` → miss → `L3 (PDP /v1/grants)` → PDP computes, writes L2, returns → client warms L1. The common case never hits the PDP.
 
 **Who writes Redis:** only the PDP. Clients never write L2 — this keeps one owner of the key schema and of invalidation. Clients read L2 or call the PDP.
+
+**Key scheme (D1, 2026-10-20):** the L1/L2 key is derived from the **profile set alone** (`rbac:grants:{sha256(sorted profiles)}`), *not* from the user. The `GrantSet` is a pure function of the profile set (pure RBAC, ADR D1/D2), so every user holding the same profiles gets the identical payload — keying per user would fragment one entry into up to 15k. `userId` is still sent to the PDP on `/v1/grants` and kept for **audit** (PDP-side), but deliberately excluded from the cache key. Entries written under the old per-user scheme orphan and expire by TTL (self-heal).
 
 **L2 Redis isolation (client):** the starter's L2 read must come from the **shared** Redis the PDP owns — never from the host microservice's own session/data Redis. If it reused the host's `StringRedisTemplate`, it would read L2 from the wrong instance (always missing), or worse, a co-located service sharing Redis credentials could write forged `GrantSet`s. The starter therefore supports a **dedicated** connection: set `rbac.client.redis.host` (+ `port`, `password`, `database`) and the starter builds its **own** private connection for L2 (a self-managed `RbacL2Redis` that implements none of the Redis factory interfaces, so it cannot be confused with the host's). When unset, it falls back to the host's `StringRedisTemplate` (only acceptable when that *is* the shared Redis). **Deployment requirement:** the L2 connection must be **read-only on `rbac:grants:*`** via Redis ACL (the client only reads; only the PDP writes).
 

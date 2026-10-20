@@ -78,7 +78,7 @@ class DefaultAccessClientMetricsTest {
     @Test
     void l1Hit_servesLocally_andRecordsHitMetrics() {
         L1Cache l1 = freshL1();
-        l1.put("u-1", Set.of("ops"), GRANT_SET);
+        l1.put(Set.of("ops"), GRANT_SET);
         DefaultAccessClient client = client(l1, null, throwingFactory());
 
         CheckResult result = client.check(user("u-1"), "orders:create");
@@ -184,7 +184,7 @@ class DefaultAccessClientMetricsTest {
     @Test
     void noMetricsSink_clientStillWorks() {
         L1Cache l1 = freshL1();
-        l1.put("u-5", Set.of("ops"), GRANT_SET);
+        l1.put(Set.of("ops"), GRANT_SET);
         RestClient rest = RestClient.builder().baseUrl("http://pdp.local").build();
         DefaultAccessClient client = new DefaultAccessClient(l1, null, rest, json); // 4-arg: no-op sink
 

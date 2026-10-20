@@ -169,7 +169,7 @@ Each decision is given as: **Context → Decision → Alternatives considered �
 ### D9 — One cached grant-set unit; clients derive check/scope/ui locally
 
 - **Context:** Avoid repeated REST calls; keep check/scope/ui mutually consistent.
-- **Decision:** The PDP returns a single **`GrantSet`** (all permissions + all scopes + all UI) keyed by `(userId, profileSet)`. The client caches it and **derives** `check`, `scope`, and `ui` from that one object.
+- **Decision:** The PDP returns a single **`GrantSet`** (all permissions + all scopes + all UI). The client caches it and **derives** `check`, `scope`, and `ui` from that one object. *(Cache key: originally `(userId, profileSet)`; refined per REVIEW D1, 2026-10-20 — the key is the **profile set alone**, since the `GrantSet` is a pure function of the profiles (pure RBAC); `userId` stays in the request for audit only. Not a decision change — semantics identical.)*
 - **Alternatives considered:** separate `/check`, `/scope`, `/ui` endpoints, each doing its own lookup.
 - **Trade-off accepted:** A single `GrantSet` may carry more than one narrow check needs.
 - **Consequences:** One fetch, coherent cache, and check/scope/ui can never disagree about the same user.

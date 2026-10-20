@@ -85,8 +85,8 @@ class InvalidationSubscriberReconnectTest {
 
         // Warm L1 the way DefaultAccessClient does after a PDP fetch.
         GrantSet grantSet = new GrantSet(List.of("orders:create"), null, null, 1L);
-        l1.put("u-r", Set.of("ops"), grantSet);
-        assertThat(l1.get("u-r", Set.of("ops"))).isNotNull();
+        l1.put(Set.of("ops"), grantSet);
+        assertThat(l1.get(Set.of("ops"))).isNotNull();
 
         // 1. Simulate a broker restart: the auto-delete queue is gone with the connection.
         //    (The consumer's channel errors; without the fix the subscriber would die here.)
@@ -103,7 +103,7 @@ class InvalidationSubscriberReconnectTest {
                 .build();
         rabbitTemplate.send(Bus.EXCHANGE, Bus.ROUTING_KEY, event);
         Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertThat(l1.get("u-r", Set.of("ops"))).as("L1 evicted after the bus loss").isNull());
+                assertThat(l1.get(Set.of("ops"))).as("L1 evicted after the bus loss").isNull());
 
         // 4. The outage was visible on the metrics, and the bus is reported up again.
         //    (The gauge is refreshed by the subscriber's monitor tick, so await it.)

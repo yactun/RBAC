@@ -6,9 +6,30 @@
 
 ---
 
-## 0. STATUS — where things stand (2026-10-19, **GREEN — ADR-002 Accepted; Track A + Track C shipped; 94 tests**)
+## 0. STATUS — where things stand (2026-10-20, **GREEN — ADR-002 Accepted; Track A + Track C shipped; D1 done; 94 tests**)
 
-**This session (2026-10-19) — Track C remainder (C2/C3/C5b, client resilience); `mvn clean verify` → 94 tests, 0 failures (access-service 72 + starter 22):**
+**This session (2026-10-20) — D1 (REVIEW: profileSet-keyed cache); `mvn clean verify` → 94 tests, 0 failures (access-service 72 + starter 22):**
+- **D1 (key the cache on the profile set, not the user):** the `GrantSet` is a pure function
+  of the profile set (pure RBAC — `GrantService.compute`/`RbacResolver` never touch
+  `userId`), so `CacheKeys.grantsKey(Set<String> profiles)` now derives
+  `rbac:grants:{sha256(sorted profiles)}` — **no `userId`**. All users holding the same
+  profiles share one L1/L2 entry (15k users → a few dozen distinct profile sets).
+  `userId` stays in the `/v1/grants` request for **audit** (PDP-side) and is deliberately
+  excluded from the key. Changed in lockstep (gotcha #3): `CacheKeys` (rbac-model),
+  PDP `GrantCache.get/put/evict` + `GrantService`, starter `L1Cache.get/put/evict/getOrLoad`
+  + `L2Cache.get` + `DefaultAccessClient`; old per-user L2 entries orphan and expire by TTL
+  (self-heal). Pinned by the cross-module contract test
+  (`l2ReadUsesTheSharedCacheKeyScheme`) + the PDP IT's L2 assertions +
+  `GrantServiceRedisDownTest` (Mockito stub updated to the 1-arg signature).
+  Gotcha #3 + D9 row updated; DESIGN §6/§7 updated.
+- **Next (per `REVIEW-implementation-vs-design.md` §4):** Track A + Track C **done**, D1
+  **done** → remaining **Track D**: **D2** cleanups (scope dedup, value-type validation,
+  explicit permission catalog, `grantedBy` w/o per-check DB hit, 404/409 semantics, bounded
+  `@Async`, JSON-escape the change-audit fields, drop dead `GrantService.scope()/ui()`),
+  **D3** the §3 test gaps, **D4** optional (pg_partman+pg_cron, OTel tracing spans,
+  `localVersion`-lag gauge).
+
+**Previously (2026-10-19) — Track C remainder (C2/C3/C5b, client resilience); `mvn clean verify` → 94 tests, 0 failures (access-service 72 + starter 22):**
 - **C2 (fresh-replica L2 seed, #6):** `DefaultAccessClient.syncVersion()` seeds the local
   policy version from `GET /v1/version` (fail-soft, monotonic max) — wired as the client
   bean's `initMethod` (startup, covers L1-only hosts) and on **every bus restore** via the
@@ -355,7 +376,7 @@ L2 + version), RabbitMQ (invalidation bus), Caffeine (L1), Flyway, JUnit 5.
 | **D6** | **RabbitMQ** invalidation bus (over Kafka, for easier ops) → near-instant revocation. Each client binds its **own non-durable, auto-delete queue** to the exchange (a shared queue would be consumed competitively). **Confirmed 2026-10-14** (Kafka's replay/durability/throughput not decisive for an ephemeral invalidation signal; reuse Kafka only if the platform already runs it). |
 | **D7** | Permission keys: `<area>:<action>` (service) and `<area>.<element>` (UI); defined once in a central `permission` catalog. **Confirmed 2026-10-14:** hard contract = cacheable key → JSON payload; naming is a soft convention; **format enforcement deferred** (optional catalog lint/test later). |
 | **D8** | Audit in PostgreSQL, **monthly-partitioned**; decision writes **async**, change writes **synchronous**. **Retention (split, ADR-002 R1 — 2026-10-16):** `audit_decision` rolling **3 months** (the 2026-10-14 figure); `audit_change` rolling **12 months** (compliance floor). Live grant rows carry `granted_at`/`granted_by` (R1). |
-| **D9** | One cached **`GrantSet`** (all perms + scopes + ui) keyed by `(userId, profileSet)`; the client derives check/scope/ui **locally** from it. |
+| **D9** | One cached **`GrantSet`** (all perms + scopes + ui); the client derives check/scope/ui **locally** from it. **Keyed by the profile set alone (D1, 2026-10-20)** — the `GrantSet` is a pure function of the profiles (pure RBAC), so `userId` is excluded from the cache key (kept for audit only); one entry is shared by every user holding the same profiles. |
 | **D10** | Global **policy version** (Redis INCR) + push invalidation, for cheap client-side staleness checks. Bump + publish run **after the admin transaction commits**. **Confirmed 2026-10-14:** near-instant revocation while the bus is healthy; **TTL-bounded graceful degradation when the bus is down** (deliberate — don't amplify load during an outage). |
 
 ---
@@ -469,9 +490,14 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
    them with unchecked casts (`@SuppressWarnings("unchecked")`) — that is *intended*
    (service-defined types). The compiler `-Xlint:unchecked` warning on
    `RbacResolver` is expected, not a bug.
-3. **Shared names live in `rbac-model`**: `CacheKeys` (Redis key = `rbac:grants:{userId}:{sha256(sorted profiles)}`)
-   and `Bus` (exchange `rbac.invalidation`, routing key `rbac.invalidated`).
-   The PDP and starter **must** derive identical keys — never re-hardcode them in a module.
+3. **Shared names live in `rbac-model`**: `CacheKeys` (Redis key = `rbac:grants:{sha256(sorted
+   profiles)}` — **profile set only since D1 (2026-10-20)**; `userId` is deliberately excluded:
+   the `GrantSet` is a pure function of the profiles, so all users holding the same profiles
+   share one entry, and `userId` stays in the `/v1/grants` request for audit only. Old per-user
+   entries orphan and expire by TTL.) and `Bus` (exchange `rbac.invalidation`, routing key
+   `rbac.invalidated`). The PDP and starter **must** derive identical keys — never re-hardcode
+   them in a module; the cross-module contract is pinned by `l2ReadUsesTheSharedCacheKeyScheme`
+   + the PDP IT's L2 assertions.
 4. **`ObjectProvider` is `org.springframework.beans.factory.ObjectProvider`**, *not*
    `org.springframework.core`. (Cost a build failure once.)
 5. **Starter optional-deps**: Redis and RabbitMQ are `<optional>` in the starter pom
@@ -772,6 +798,12 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
   - **C5b (stampede protection, #10)** — `L1Cache.getOrLoad` (Caffeine per-key
     locking) coalesces concurrent cold misses into one PDP fetch; fail-closed kept.
     `L1CacheCoalescingTest` (16 concurrent → 1 fetch). **94 tests green.**
+- **D1 (REVIEW: profileSet-keyed cache) — DONE (2026-10-20):** `CacheKeys.grantsKey(Set)`
+  → `rbac:grants:{sha256(sorted profiles)}` (no `userId` — the `GrantSet` is a pure
+  function of the profiles; `userId` stays in the request for audit only). PDP
+  `GrantCache`/`GrantService` + starter `L1Cache`/`L2Cache`/`DefaultAccessClient`
+  updated in lockstep; old per-user entries self-heal by TTL. Cross-module contract
+  test + PDP IT pin the new key. Gotcha #3 + D9 row updated.
 
 **Intentionally NOT done (team review completed 2026-10-14 — see §10):**
 - No admin *surface* beyond the JSON API (A5: API/config first — no UI in v1).
@@ -832,24 +864,29 @@ implementation items in §11.
    (`ed2d13e`, `2bd63ab`, `6f53a5b` + this session's S1 commit; see §0/§9).
 7. **DONE (2026-10-19)** — **Track C remainder: C2/C3/C5b** (fresh-replica L2 seed #6,
    subscriber durability #7, stampede protection #10). See §0/§9; gotcha #32.
-8. **NEXT — Track D** (per `REVIEW-implementation-vs-design.md` §4): **D1** profileSet-keyed
-   cache key (shared `CacheKeys` contract — PDP + starter in lockstep, gotcha #3), then
-   **D2** (scope dedup, value-type validation, explicit permission catalog, `grantedBy`
-   without a per-check DB hit, 404/409 semantics, bounded `@Async`, JSON-escape the
-   change-audit fields, drop dead `GrantService.scope()/ui()`), then **D3** (the §3 test
-   gaps), **D4** optional (pg_partman+pg_cron, OTel tracing spans, `localVersion`-lag gauge).
-9. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
+8. **DONE (2026-10-20) — D1** profileSet-keyed cache key (shared `CacheKeys` contract —
+   PDP + starter in lockstep, gotcha #3; cross-module contract test pins it).
+9. **NEXT — D2** (per `REVIEW-implementation-vs-design.md` §4): scope dedup, value-type
+   validation, explicit permission catalog, `grantedBy` without a per-check DB hit,
+   404/409 semantics, bounded `@Async`, JSON-escape the change-audit fields, drop dead
+   `GrantService.scope()/ui()`; then **D3** (the §3 test gaps); **D4** optional
+   (pg_partman+pg_cron, OTel tracing spans, `localVersion`-lag gauge).
+10. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
    (conditional grants). Gated on a team decision; do not build unilaterally.
 
 ---
 
-*Last updated: 2026-10-19 (**TRACK C REMAINDER SHIPPED** — C2 fresh-replica L2 seed,
+*Last updated: 2026-10-20 (**D1 SHIPPED** — profileSet-keyed cache: `CacheKeys.grantsKey(Set)`
+→ `rbac:grants:{sha256(sorted profiles)}`, `userId` excluded (audit-only), PDP + starter in
+lockstep, cross-module contract test pins it; `mvn clean verify` → **94 tests, 0 failures**
+(access-service 72 + starter 22). Gotcha #3 + D9 row + DESIGN §6/§7 updated. Track A + Track C
+done, D1 done, **remaining: Track D (D2 → D3 → D4 optional)**. Prior 2026-10-19:
+**TRACK C REMAINDER SHIPPED** — C2 fresh-replica L2 seed,
 C3 subscriber durability (monitor + non-fatal missing queues + `rbac.client.bus.*`
 meters), C5b stampede protection (Caffeine per-key locking); `mvn clean verify` →
 **94 tests, 0 failures** (access-service 72 + starter 22). New gotcha #32 (spring-rabbit
 3.2.12 recovery semantics). DESIGN §7 + §10 and `REVIEW-implementation-vs-design.md` §4/§6
-in agreement; Track A + Track C done, **remaining: Track D (D1 profileSet keying →
-D2 → D3 → D4 optional)**. Prior 2026-10-17: **TRACK A (ADR-002) SHIPPED** — S1/T1/S2/R1 implemented, A1 descoped;
+in agreement. Prior 2026-10-17: **TRACK A (ADR-002) SHIPPED** — S1/T1/S2/R1 implemented, A1 descoped;
 `mvn clean verify` → **88 tests, 0 failures** (access-service 72 + starter 16). Commits: T1
 `ed2d13e`, S2 `2bd63ab`, R1+A1 `6f53a5b`, S1 `12d9d8c`. New gotchas
 #28–#31 (S1 security-chain wiring). ADR-002 marked implemented per decision; DESIGN §1/§2/§4/§6/

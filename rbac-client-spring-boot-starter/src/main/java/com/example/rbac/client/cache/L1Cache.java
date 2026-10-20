@@ -25,12 +25,12 @@ public class L1Cache {
                 .build();
     }
 
-    public GrantSet get(String userId, Set<String> profiles) {
-        return cache.getIfPresent(CacheKeys.grantsKey(userId, profiles));
+    public GrantSet get(Set<String> profiles) {
+        return cache.getIfPresent(CacheKeys.grantsKey(profiles));
     }
 
-    public void put(String userId, Set<String> profiles, GrantSet grantSet) {
-        cache.put(CacheKeys.grantsKey(userId, profiles), grantSet);
+    public void put(Set<String> profiles, GrantSet grantSet) {
+        cache.put(CacheKeys.grantsKey(profiles), grantSet);
     }
 
     /**
@@ -40,13 +40,13 @@ public class L1Cache {
      * result. A loader failure stores nothing and propagates to every waiter
      * (fail-closed is preserved).
      */
-    public GrantSet getOrLoad(String userId, Set<String> profiles, Supplier<GrantSet> loader) {
-        return cache.get(CacheKeys.grantsKey(userId, profiles), key -> loader.get());
+    public GrantSet getOrLoad(Set<String> profiles, Supplier<GrantSet> loader) {
+        return cache.get(CacheKeys.grantsKey(profiles), key -> loader.get());
     }
 
-    /** Drop a single user's entry (scoped invalidation). */
-    public void evict(String userId, Set<String> profiles) {
-        cache.invalidate(CacheKeys.grantsKey(userId, profiles));
+    /** Drop one profile-set's entry (scoped invalidation). */
+    public void evict(Set<String> profiles) {
+        cache.invalidate(CacheKeys.grantsKey(profiles));
     }
 
     /** Drop everything (global invalidation). */

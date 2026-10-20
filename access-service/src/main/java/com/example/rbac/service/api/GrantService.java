@@ -151,7 +151,7 @@ public class GrantService {
         GrantSet cached = null;
         if (redisUp) {
             try {
-                cached = cache.get(user.userId(), user.profiles());
+                cached = cache.get(user.profiles());
             } catch (RuntimeException e) {
                 log.warn("Redis unavailable (cache.get); serving from Postgres, degraded: {}", e.toString());
                 redisUp = false;
@@ -166,7 +166,7 @@ public class GrantService {
         GrantSet computed = compute(user, current);
         if (redisUp) {
             try {
-                cache.put(user.userId(), user.profiles(), computed);
+                cache.put(user.profiles(), computed);
             } catch (RuntimeException e) {
                 log.warn("Redis unavailable (cache.put); returning the uncached Postgres result: {}", e.toString());
             }

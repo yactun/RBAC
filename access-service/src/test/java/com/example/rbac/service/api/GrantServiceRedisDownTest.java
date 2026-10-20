@@ -42,7 +42,7 @@ class GrantServiceRedisDownTest {
         RedisConnectionFailureException down =
                 new RedisConnectionFailureException("simulated Redis outage (connection refused)");
         when(version.current()).thenThrow(down);
-        when(cache.get(any(), any())).thenThrow(down);
+        when(cache.get(any())).thenThrow(down);
 
         // What the loader would return from Postgres (healthy): the "ops" profile grants orders:create.
         ProfileGrants ops = new ProfileGrants("ops", Set.of("orders:create"),
