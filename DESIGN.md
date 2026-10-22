@@ -91,6 +91,8 @@ POST /v1/check
 }
 ```
 
+> **D2 (2026-10-22):** `grantedBy` is answered from the cached `GrantSet` (§4.2) — no per-check DB query.
+
 ### 4.2 Grant set (the cached unit: permissions + UI + scopes in one call)
 
 ```
@@ -115,23 +117,32 @@ POST /v1/grants
               {"key":"tab.invoices", "visible": true},
               {"key":"tab.payments", "visible": false}
             ] } },
+  "grantedBy": { "orders:create": ["finance"], "orders:read": ["finance","regional-ops"] },
   "version": 123
 }
 ```
 
 Notes:
 - This is the **single cached unit** (`GrantSet`, ADR D9). The client derives `check` / `scope` / `ui` **locally** from it — there is no separate `/scope` or `/ui` endpoint.
+- `grantedBy` maps each permission key to the profiles that grant it — **D2 (2026-10-22)**: it is part of the cached unit so `POST /v1/check`'s `grantedBy` answer (and the client's local `check()`) need **no per-check DB query**. Still a pure function of the profile set (no `userId`). **Wire change** (5th component) — PDP writer and starter reader must be updated in lockstep (pinned by the cross-module contract test + all `new GrantSet(...)` sites).
 - `version` is a monotonically increasing service-wide policy version. Clients compare it to detect stale local cache cheaply (§7).
 - **T1 (ADR-002):** a template is a *layout catalog* — `permissions` contains a template-element key (e.g. `customers-web.tab.invoices`) **only if it was granted explicitly**; attaching the template never grants it. The `ui` bundle lists the element either way, with `visible` driven by the permission (`tab.payments` above is listed but hidden because its gating permission is not granted).
 - **S2 (ADR-002):** scopes are canonical **Option A** filters — `{dimension, op, values}` with a closed op set `IN/EQ/GT/GTE/LT/LTE/BETWEEN/ALL`, AND across dimensions. `IN []` = deny (no rows); `ALL` = explicit all-rows; a missing dimension is an error, never "all rows".
 
-### 4.3 Admin (all writes are audited, §8; every one bumps the version and publishes invalidation **after commit**)
+### 4.3 Admin (all writes are audited, §8; grant-affecting mutations bump the version and publish invalidation **after commit**)
 
 All admin endpoints take an `X-Actor` header (the admin identity, recorded in the change audit).
 
+**D2 (2026-10-22) semantics:** the permission catalog is **explicit** — keys are created with
+`POST /v1/admin/permissions` and are never auto-created on grant; a grant (or template element)
+referencing an unknown key is a **404** ("create it first"). Not-found resources → **404**,
+duplicate creates → **409** (never a 500). Permission creation is change-audited but publishes
+**no** invalidation (a brand-new key is in no `GrantSet` yet).
+
 ```
+POST   /v1/admin/permissions                          { "key":"orders:create" }     # 201; 409 if it exists
 POST   /v1/admin/profiles                             { "name":"finance", "description":"..." }
-POST   /v1/admin/profiles/{name}/permissions          { "key":"orders:create" }
+POST   /v1/admin/profiles/{name}/permissions          { "key":"orders:create" }     # key must exist in the catalog (else 404)
 DELETE /v1/admin/profiles/{name}/permissions/{key}
 PUT    /v1/admin/profiles/{name}/scopes/{resourceType}
          [ {"dimension":"orgIds","op":"IN","values":[1,2,3]},
@@ -153,10 +164,13 @@ POST   /v1/admin/resource-types                       { "name":"orders", "ownerS
 > and validates it: dimensions must exactly match the resource type's `dimensionSchema`
 > (400 otherwise — the scope-merge contract), each op must be allowed by that dimension's
 > schema (`ops`, default `[IN, ALL]`), and arity per op is enforced (`IN` any / `EQ`,`GT`,
-> `GTE`,`LT`,`LTE` one / `BETWEEN` two / `ALL` zero). `DELETE .../scopes/{resourceType}`
-> is the explicit scope revocation. `POST /v1/admin/resource-types` requires a
-> non-empty `dimensionSchema`. `DELETE .../templates/...` detaches a template (T1: it
-> never had — or removes — any permission grant).
+> `GTE`,`LT`,`LTE` one / `BETWEEN` two / `ALL` zero), and **value types are checked
+> against the schema's `item` type** (D2, 2026-10-22 — `string`/`int`/`number`/`boolean`;
+> an unknown `item` type means no check) so a wrong-typed grant is a **400** at authoring
+> rather than a runtime surprise. `DELETE .../scopes/{resourceType}` is the explicit
+> scope revocation. `POST /v1/admin/resource-types` requires a non-empty `dimensionSchema`.
+> `DELETE .../templates/...` detaches a template (T1: it never had — or removes — any
+> permission grant).
 
 ---
 
@@ -411,9 +425,9 @@ Because clients are stateless and multi-replica, a purely local cache fragments.
 
 ## 8. Audit
 
-- **Decision audit** (`audit_decision`): every `check` — `ts, user_id, request_id, calling_service, op, target, allowed, profile_set`. Written **asynchronously** (an in-process `@Async` writer to a partitioned table). Never on the decision hot path.
+- **Decision audit** (`audit_decision`): every `check` — `ts, user_id, request_id, calling_service, op, target, allowed, profile_set`. Written **asynchronously** (an in-process `@Async` writer to a partitioned table). Never on the decision hot path. **Bounded (D2, 2026-10-22):** `AuditAsyncConfig` supplies the `applicationTaskExecutor` bean (Boot's unbounded auto-config backs off) — 2/8 pool, **1000** queue, `CallerRunsPolicy` (saturated → the caller runs the audit inline: no dropped writes, bounded memory), `waitForTasksToCompleteOnShutdown=true` (a shutdown drains the queue — see gotcha #33).
   > **Scope (ADR-002 A1, team 2026-10-16):** per-check audit applies to **direct `/v1/check` callers**. The production path — the starter deriving `check`/`scope`/`ui` **locally** from the cached `GrantSet` (ADR D9) — is **not** audited per decision; the mandated trail is **grant issuance + changes** (below).
-- **Change audit** (`audit_change`): every admin mutation — `actor, entity, entity_ref, action, detail`. Synchronous (the mutation is the event) but written in the same transaction as the grant change.
+- **Change audit** (`audit_change`): every admin mutation — `actor, entity, entity_ref, action, detail`. Synchronous (the mutation is the event) but written in the same transaction as the grant change. The `detail` JSON is built with the injected `ObjectMapper` (D2 — not string concatenation), so a key containing a `"` can no longer break the `::jsonb` cast.
 - **Live-grant provenance (ADR-002 R1):** the live grant rows themselves (`profile_permission`, `profile_scope`, `profile_template`) carry `granted_at` + `granted_by` (stamped by `AdminService` on each grant mutation), so **"who granted this active grant, and when?" stays answerable from the model itself** even after the change audit rolls off its window.
 - **Retention (split, ADR-002 R1 — team-confirmed 2026-10-16; SOX/ISO 27001 norm):** `audit_decision` → rolling **3 months** (high volume); `audit_change` → rolling **12 months** (compliance floor). Monthly partitions with **drop/archive per table window** (scheduled job + runbook: idempotent `ops/rotate_audit_partitions.sql` + `RUNBOOK-audit-partitions.md`, verified on PostgreSQL 16). Every record is queryable — an audit is a query, not archaeology.
 

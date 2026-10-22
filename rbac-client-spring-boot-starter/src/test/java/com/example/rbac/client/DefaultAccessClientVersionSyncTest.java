@@ -46,9 +46,9 @@ class DefaultAccessClientVersionSyncTest {
     private final RbacClientMetrics metrics = new MicrometerRbacClientMetrics(registry);
 
     /** The stale L2 entry (written before this replica saw any invalidation event). */
-    private static final GrantSet STALE = new GrantSet(List.of("orders:create"), null, null, 7L);
+    private static final GrantSet STALE = new GrantSet(List.of("orders:create"), null, null, Map.of(), 7L);
     /** The current PDP answer — newer than the stale L2 entry. */
-    private static final GrantSet FRESH = new GrantSet(List.of("orders:create"), null, null, 11L);
+    private static final GrantSet FRESH = new GrantSet(List.of("orders:create"), null, null, Map.of(), 11L);
     /** What the PDP's /v1/version probe reports. */
     private static final long PDP_VERSION = 10L;
 

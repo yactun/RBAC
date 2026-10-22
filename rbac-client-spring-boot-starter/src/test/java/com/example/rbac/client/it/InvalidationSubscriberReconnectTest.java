@@ -25,6 +25,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -84,7 +85,7 @@ class InvalidationSubscriberReconnectTest {
         Awaitility.await().atMost(Duration.ofSeconds(15)).until(this::consumerOnQueue);
 
         // Warm L1 the way DefaultAccessClient does after a PDP fetch.
-        GrantSet grantSet = new GrantSet(List.of("orders:create"), null, null, 1L);
+        GrantSet grantSet = new GrantSet(List.of("orders:create"), null, null, Map.of(), 1L);
         l1.put(Set.of("ops"), grantSet);
         assertThat(l1.get(Set.of("ops"))).isNotNull();
 

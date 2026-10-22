@@ -18,6 +18,9 @@ import java.util.Set;
  * <ul>
  *   <li><b>permissions</b> — union across all profiles. Template elements are a
  *       LAYOUT CATALOG (T1): they never contribute permissions here.</li>
+ *   <li><b>grantedBy</b> — each permission key &rarr; the profiles that grant it
+ *       (provenance for {@code /v1/check}; carried in the cached {@code GrantSet}
+ *       so the decision path never re-queries the DB per check — REVIEW D2).</li>
  *   <li><b>scopes</b> — per resourceType, the filters are OR-merged per dimension
  *       (union of the allowed sets): {@code IN} values union; {@code EQ} OR
  *       {@code EQ} = {@code IN} (or {@code EQ} if equal); {@code GT}/{@code GTE} =
@@ -44,9 +47,13 @@ public final class RbacResolver {
 
         Set<String> permissions = new LinkedHashSet<>();
         Map<String, List<Scope.Filter>> scopes = new LinkedHashMap<>();
+        Map<String, List<String>> grantedBy = new LinkedHashMap<>();
 
         for (ProfileGrants g : grants) {
-            permissions.addAll(g.permissionKeys());
+            for (String key : g.permissionKeys()) {
+                permissions.add(key);
+                grantedBy.computeIfAbsent(key, k -> new ArrayList<>()).add(g.profileName());
+            }
             g.scopes().forEach((resourceType, filters) -> {
                 if (allResources || wantedResourceTypes.contains(resourceType)) {
                     merge(scopes, resourceType, filters);
@@ -66,7 +73,8 @@ public final class RbacResolver {
         return new Resolved(
                 List.copyOf(permissions),
                 scopeViews,
-                ui
+                ui,
+                Map.copyOf(grantedBy)
         );
     }
 
@@ -183,9 +191,10 @@ public final class RbacResolver {
                         + a + " vs " + b);
     }
 
-    /** The resolved effective grants (permissions, scopes, ui). */
+    /** The resolved effective grants (permissions, scopes, ui, grantedBy). */
     public record Resolved(List<String> permissions,
                            Map<String, Scope> scopes,
-                           Map<String, UiElements> ui) {
+                           Map<String, UiElements> ui,
+                           Map<String, List<String>> grantedBy) {
     }
 }

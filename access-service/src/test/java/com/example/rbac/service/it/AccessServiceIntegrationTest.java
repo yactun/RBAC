@@ -218,6 +218,11 @@ class AccessServiceIntegrationTest {
         // --- authoring via the admin API (each call bumps the version + invalidates) ---
         assertThat(post("/v1/admin/profiles",
                 Map.of("name", profile, "description", "integration test"))).isEqualTo(201);
+        // D2 (REVIEW): the permission catalog is EXPLICIT (ADR D7) — keys are created
+        // on purpose (POST /v1/admin/permissions); granting an unknown key is a 404.
+        ensurePermission("orders:create");
+        ensurePermission("customers-web.tab.invoices");
+        ensurePermission("customers-web.tab.orders");
         assertThat(post("/v1/admin/profiles/" + profile + "/permissions", Map.of("key", "orders:create")))
                 .isEqualTo(200);
         // R1 (ADR-002): the live grant row records its origin — "who granted this
@@ -239,7 +244,7 @@ class AccessServiceIntegrationTest {
         assertThat(post("/v1/admin/resource-types", Map.of(
                 "name", "orders",
                 "ownerService", "orders-svc",
-                "dimensionSchema", Map.of("orgIds", Map.of("type", "list", "item", "string")))))
+                "dimensionSchema", Map.of("orgIds", Map.of("type", "list", "item", "int")))))
                 .isEqualTo(201);
         // S2 (ADR-002): canonical Option A filter list (typed predicates)
         assertThat(put("/v1/admin/profiles/" + profile + "/scopes/orders",
@@ -347,6 +352,7 @@ class AccessServiceIntegrationTest {
         String profile = "it-metrics-" + System.nanoTime();
         assertThat(post("/v1/admin/profiles",
                 Map.of("name", profile, "description", "metrics test"))).isEqualTo(201);
+        ensurePermission("orders:create");   // may already exist from another test (shared context) → 201 or 409
         assertThat(post("/v1/admin/profiles/" + profile + "/permissions", Map.of("key", "orders:create")))
                 .isEqualTo(200);
         Set<String> profiles = Set.of(profile);
@@ -393,6 +399,17 @@ class AccessServiceIntegrationTest {
 
     private int post(String url, Object body) {
         return rest.postForEntity(url, new HttpEntity<>(body, actor()), Map.class).getStatusCode().value();
+    }
+
+    /**
+     * D2 (REVIEW): create a permission catalog key, tolerating the case where another
+     * test in the shared context already created it (409 = it exists, which is what we
+     * need for the grant that follows). Pins both the 201 and the 409 semantics.
+     */
+    private void ensurePermission(String key) {
+        int status = post("/v1/admin/permissions", Map.of("key", key));
+        assertThat(status).as("permission '%s' created (201) or already in the catalog (409)", key)
+                .isIn(201, 409);
     }
 
     private int put(String url, Object body) {

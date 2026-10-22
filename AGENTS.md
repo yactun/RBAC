@@ -6,9 +6,50 @@
 
 ---
 
-## 0. STATUS — where things stand (2026-10-20, **GREEN — ADR-002 Accepted; Track A + Track C shipped; D1 done; 94 tests**)
+## 0. STATUS — where things stand (2026-10-22, **GREEN — ADR-002 Accepted; Track A + C shipped; D1 + D2 done; 106 tests**)
 
-**This session (2026-10-20) — D1 (REVIEW: profileSet-keyed cache); `mvn clean verify` → 94 tests, 0 failures (access-service 72 + starter 22):**
+**This session (2026-10-22) — D2 (REVIEW: correctness cleanups); `mvn clean verify` → 106 tests, 0 failures (access-service 84 + starter 22):**
+- **D2 (all the REVIEW §2 "small bugs" + catalog hardening):**
+  - **Explicit permission catalog (ADR D7, no longer auto-created):** new idempotent-ish
+    `POST /v1/admin/permissions` (201; **409** if the key exists). `AdminService.requirePermission`
+    no longer `save()`s unknown keys — a typo like `orders:refnud` is a **404** ("create it first"),
+    for grants AND template elements. Creation publishes **no invalidation** (a brand-new key is in
+    no `GrantSet` yet) but is change-audited.
+  - **404/409 semantics:** every admin not-found/duplicate now throws
+    `ResponseStatusException` (profile/template/resource-type not found → **404**;
+    create-duplicate → **409**) instead of `IllegalStateException` (500).
+  - **`grantedBy` without a per-check DB hit:** `GrantSet` (rbac-model) gains
+    `grantedBy: Map<permissionKey, List<profiles>>`, built once by `RbacResolver` at compute time.
+    PDP `/v1/check` reads it from the cached unit (the old `loader.load()` per check is gone); the
+    client's `check()` now derives it locally too (was `List.of()`). **GrantSet wire format changed
+    (5th component) — update all `new GrantSet(...)` sites in lockstep** (done: 8 test sites).
+  - **Scope value-type validation at authoring:** `setScope` checks filter values against the
+    schema's `item` type (`string`/`int`/`number`/`boolean`; unknown type = no check) → 400 on
+    mismatch. The IT's `orders` schema now declares `item: "int"` (it had `string` + int values —
+    the test's own bug).
+  - **JSON-escaped change audit:** every `audit.change` detail is built with the injected
+    `ObjectMapper` (no more `"{\"key\":\"" + ...` concatenation — a `"` in a key used to break the
+    `::jsonb` cast). Pinned by `changeAuditDetail_isEscapedThroughObjectMapper`.
+  - **Bounded `@Async` (ADR-001 risk-table "backpressure" now real):** new `AuditAsyncConfig`
+    defines the `applicationTaskExecutor` bean (Boot's auto-config backs off) — 2/8 pool, **1000**
+    queue, `CallerRunsPolicy` (saturated → the caller runs the audit inline: no dropped writes,
+    bounded memory), `waitForTasksToCompleteOnShutdown=true`. **Gotcha #33:** Spring's
+    `ThreadPoolTaskExecutor.shutdown()` calls `shutdownNow()` (interrupts + **drains the queue**)
+    unless `waitForTasksToCompleteOnShutdown=true` — that is what made the saturation test flaky.
+  - **Dead code dropped:** `GrantService.scope()`/`ui()` had no controller caller (the client
+    derives them locally, ADR D9) — removed, with the class javadoc now saying so.
+  - Scope **dedup** was already implemented (pinned by `RbacResolverTest` — `EU, US` union).
+- **Tests:** `AdminServiceTest` 16→**25** (+9: catalog create/409, no-auto-create 404, 404 profile,
+  createProfile 409, resourceType 409, value-type reject/accept, audit-JSON escape);
+  `RbacResolverTest` 13→**14** (`grantedBy` map); new `AuditAsyncConfigTest` (**2**, incl. a
+  deterministic overflow→caller demonstration); IT `decisionFlow`/`metrics` now `ensurePermission`
+  (201 **or** 409) before granting; `GrantSet` 5-arg constructor in all 8 test sites.
+- **Next (per `REVIEW-implementation-vs-design.md` §4):** D1 + D2 **done** → remaining **Track D**:
+  **D3** the §3 test gaps (Redis-down / broker-restart / stale-L2 / template-revoke / empty-scope /
+  unauthenticated-admin are mostly pinned already — the residual gap list), **D4** optional
+  (pg_partman+pg_cron, OTel tracing spans, `localVersion`-lag gauge).
+
+**Previously (2026-10-20) — D1 (REVIEW: profileSet-keyed cache); `mvn clean verify` → 94 tests, 0 failures (access-service 72 + starter 22):**
 - **D1 (key the cache on the profile set, not the user):** the `GrantSet` is a pure function
   of the profile set (pure RBAC — `GrantService.compute`/`RbacResolver` never touch
   `userId`), so `CacheKeys.grantsKey(Set<String> profiles)` now derives
@@ -22,12 +63,9 @@
   (`l2ReadUsesTheSharedCacheKeyScheme`) + the PDP IT's L2 assertions +
   `GrantServiceRedisDownTest` (Mockito stub updated to the 1-arg signature).
   Gotcha #3 + D9 row updated; DESIGN §6/§7 updated.
-- **Next (per `REVIEW-implementation-vs-design.md` §4):** Track A + Track C **done**, D1
-  **done** → remaining **Track D**: **D2** cleanups (scope dedup, value-type validation,
-  explicit permission catalog, `grantedBy` w/o per-check DB hit, 404/409 semantics, bounded
-  `@Async`, JSON-escape the change-audit fields, drop dead `GrantService.scope()/ui()`),
-  **D3** the §3 test gaps, **D4** optional (pg_partman+pg_cron, OTel tracing spans,
-  `localVersion`-lag gauge).
+- **Next (at the time):** D2 cleanups — **done 2026-10-22** (see the entry above);
+  remaining after that: **D3** the §3 test gaps, **D4** optional (pg_partman+pg_cron,
+  OTel tracing spans, `localVersion`-lag gauge).
 
 **Previously (2026-10-19) — Track C remainder (C2/C3/C5b, client resilience); `mvn clean verify` → 94 tests, 0 failures (access-service 72 + starter 22):**
 - **C2 (fresh-replica L2 seed, #6):** `DefaultAccessClient.syncVersion()` seeds the local
@@ -374,7 +412,7 @@ L2 + version), RabbitMQ (invalidation bus), Caffeine (L1), Flyway, JUnit 5.
 | **D4** | Templates = named bundles of UI-element **permission keys**; one permission-key mechanism for both features and UI; front-end owns rendering. |
 | **D5** | **3-tier cache** — L1 Caffeine (60s) → L2 Redis (5–15min, PDP-owned, clients read directly) → L3 PostgreSQL. |
 | **D6** | **RabbitMQ** invalidation bus (over Kafka, for easier ops) → near-instant revocation. Each client binds its **own non-durable, auto-delete queue** to the exchange (a shared queue would be consumed competitively). **Confirmed 2026-10-14** (Kafka's replay/durability/throughput not decisive for an ephemeral invalidation signal; reuse Kafka only if the platform already runs it). |
-| **D7** | Permission keys: `<area>:<action>` (service) and `<area>.<element>` (UI); defined once in a central `permission` catalog. **Confirmed 2026-10-14:** hard contract = cacheable key → JSON payload; naming is a soft convention; **format enforcement deferred** (optional catalog lint/test later). |
+| **D7** | Permission keys: `<area>:<action>` (service) and `<area>.<element>` (UI); defined once in a central `permission` catalog. **Confirmed 2026-10-14:** hard contract = cacheable key → JSON payload; naming is a soft convention; **format enforcement deferred** (optional catalog lint/test later). **Explicit catalog (D2, 2026-10-22):** keys are created via `POST /v1/admin/permissions` (201; 409 if exists) — the admin API **no longer auto-creates** an unknown key on grant/template attach (a typo is a 404, "create it first"). |
 | **D8** | Audit in PostgreSQL, **monthly-partitioned**; decision writes **async**, change writes **synchronous**. **Retention (split, ADR-002 R1 — 2026-10-16):** `audit_decision` rolling **3 months** (the 2026-10-14 figure); `audit_change` rolling **12 months** (compliance floor). Live grant rows carry `granted_at`/`granted_by` (R1). |
 | **D9** | One cached **`GrantSet`** (all perms + scopes + ui); the client derives check/scope/ui **locally** from it. **Keyed by the profile set alone (D1, 2026-10-20)** — the `GrantSet` is a pure function of the profiles (pure RBAC), so `userId` is excluded from the cache key (kept for audit only); one entry is shared by every user holding the same profiles. |
 | **D10** | Global **policy version** (Redis INCR) + push invalidation, for cheap client-side staleness checks. Bump + publish run **after the admin transaction commits**. **Confirmed 2026-10-14:** near-instant revocation while the bus is healthy; **TTL-bounded graceful degradation when the bus is down** (deliberate — don't amplify load during an outage). |
@@ -417,10 +455,16 @@ Decision (called by clients / SDK):
 - `POST /v1/grants` — `{userId, profiles}` → full `GrantSet` (**the cached unit**)
 - `GET  /v1/version` → `{version}` (cheap probe)
 
-Admin (audited authoring; every one bumps version + publishes invalidation **after commit**):
+Admin (audited authoring; grant-affecting mutations bump version + publish invalidation
+**after commit** — pure-catalog writes like permission creation are change-audited but
+publish **no** invalidation, since a brand-new key is in no `GrantSet` yet; **D2, 2026-10-22:**
+not-found → **404**, duplicate → **409**, never 500):
+- `POST   /v1/admin/permissions` — create a catalog key (201; **409** if it exists; no invalidation)
 - `POST   /v1/admin/profiles`
 - `POST   /v1/admin/profiles/{name}/permissions`  ·  `DELETE .../permissions/{key}`
+  — grant/revoke a key that **already exists in the catalog** (unknown key → **404**)
 - `PUT    /v1/admin/profiles/{name}/scopes/{resourceType}` — body = Option A filter list
+  (values type-checked against the schema's `item` type — D2)
 - `DELETE /v1/admin/profiles/{name}/scopes/{resourceType}` — explicit scope revocation (ADR-002 S2)
 - `POST   /v1/admin/templates`  ·  `POST /v1/admin/profiles/{name}/templates`
 - `DELETE /v1/admin/profiles/{name}/templates/{appId}/{name}` — detach (ADR-002 T1)
@@ -729,6 +773,20 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
     Testcontainers `RabbitMQContainer` **re-maps ports on `restart()`**, which would
     leave the `@ServiceConnection`-wired context on a dead port — that's why the IT
     deletes the queue out from under a live consumer instead (same end state, no flake).
+33. **D2 (bounded `@Async`): Spring's `ThreadPoolTaskExecutor.shutdown()` is NOT a graceful
+    shutdown by default.** `ExecutorConfigurationSupport.shutdown()` (spring-context 6.2.7,
+    verified in bytecode) calls the underlying `ExecutorService`'s **`shutdownNow()`**
+    (interrupts running tasks + **drains the queue**) unless
+    `waitForTasksToCompleteOnShutdown=true`; only `destroy()` then awaits. A naive test that
+    enqueues a task and then calls `pool.shutdown()` therefore **silently drops the queued
+    task** ("expected: 4 but was: 3", flaky 10/10 under surefire) — the pool still reports
+    terminated. Fix applied in two places: (a) the `AuditAsyncConfig` bean sets
+    `setWaitForTasksToCompleteOnShutdown(true)` + `setAwaitTerminationSeconds(5)` so a real
+    context shutdown drains the audit queue (no lost writes); (b) the `AuditAsyncConfigTest`
+    saturation demo sets the same flag on its local pool before `initialize()`. Note the
+    difference from a raw `ThreadPoolExecutor`, whose `shutdown()` is always graceful —
+    that asymmetry is why a standalone repro passed 200/200 while the Spring-wrapped test
+    failed.
 
 ---
 
@@ -804,6 +862,17 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
   `GrantCache`/`GrantService` + starter `L1Cache`/`L2Cache`/`DefaultAccessClient`
   updated in lockstep; old per-user entries self-heal by TTL. Cross-module contract
   test + PDP IT pin the new key. Gotcha #3 + D9 row updated.
+- **D2 (REVIEW: correctness cleanups) — DONE (2026-10-22):** explicit permission
+  catalog (`POST /v1/admin/permissions` 201/409; unknown key → 404, no auto-create,
+  grants + template elements); 404/409 semantics (was 500); `GrantSet` carries
+  `grantedBy: Map<key, List<profiles>>` (5th wire component — all constructor sites
+  updated in lockstep) so `/v1/check` and the client's `check()` no longer hit the DB
+  per check; scope value-type validation at authoring (400 on `item` mismatch);
+  JSON-escaped `audit.change` details via the injected `ObjectMapper`; bounded
+  `@Async` executor (`AuditAsyncConfig`: 2/8 pool, 1000 queue, `CallerRunsPolicy`,
+  `waitForTasksToCompleteOnShutdown=true`); dead `GrantService.scope()/ui()` dropped.
+  Tests: `AdminServiceTest` 16→25, `RbacResolverTest` 13→14, new `AuditAsyncConfigTest`
+  (2); **106 tests green** (access-service 84 + starter 22). Gotcha #33.
 
 **Intentionally NOT done (team review completed 2026-10-14 — see §10):**
 - No admin *surface* beyond the JSON API (A5: API/config first — no UI in v1).
@@ -866,21 +935,31 @@ implementation items in §11.
    subscriber durability #7, stampede protection #10). See §0/§9; gotcha #32.
 8. **DONE (2026-10-20) — D1** profileSet-keyed cache key (shared `CacheKeys` contract —
    PDP + starter in lockstep, gotcha #3; cross-module contract test pins it).
-9. **NEXT — D2** (per `REVIEW-implementation-vs-design.md` §4): scope dedup, value-type
-   validation, explicit permission catalog, `grantedBy` without a per-check DB hit,
-   404/409 semantics, bounded `@Async`, JSON-escape the change-audit fields, drop dead
-   `GrantService.scope()/ui()`; then **D3** (the §3 test gaps); **D4** optional
-   (pg_partman+pg_cron, OTel tracing spans, `localVersion`-lag gauge).
-10. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
+9. **DONE (2026-10-22) — D2** (per `REVIEW-implementation-vs-design.md` §4): scope dedup
+   (already done), value-type validation, explicit permission catalog, `grantedBy`
+   without a per-check DB hit, 404/409 semantics, bounded `@Async`, JSON-escape the
+   change-audit fields, dead `GrantService.scope()/ui()` dropped; **106 tests green**.
+   See the §0 D2 entry + §9 bullet; gotcha #33.
+10. **NEXT — D3** (the `REVIEW-implementation-vs-design.md` §3 test gaps — audit which are
+   already pinned; add only the truly missing tests); **D4** optional (pg_partman+pg_cron,
+   OTel tracing spans, `localVersion`-lag gauge).
+11. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
    (conditional grants). Gated on a team decision; do not build unilaterally.
 
 ---
 
-*Last updated: 2026-10-20 (**D1 SHIPPED** — profileSet-keyed cache: `CacheKeys.grantsKey(Set)`
-→ `rbac:grants:{sha256(sorted profiles)}`, `userId` excluded (audit-only), PDP + starter in
-lockstep, cross-module contract test pins it; `mvn clean verify` → **94 tests, 0 failures**
-(access-service 72 + starter 22). Gotcha #3 + D9 row + DESIGN §6/§7 updated. Track A + Track C
-done, D1 done, **remaining: Track D (D2 → D3 → D4 optional)**. Prior 2026-10-19:
+*Last updated: 2026-10-22 (**D2 SHIPPED** — correctness cleanups: explicit permission
+catalog (`POST /v1/admin/permissions` 201/409, no auto-create — unknown key 404), 404/409
+semantics, `grantedBy` in `GrantSet` (5th wire component — all constructor sites updated in
+lockstep) so `/v1/check` + client `check()` need no per-check DB hit, scope value-type
+validation at authoring, JSON-escaped `audit.change` details, bounded `@Async`
+(`AuditAsyncConfig`: 2/8 pool, 1000 queue, `CallerRunsPolicy`), dead `GrantService.scope()/ui()`
+dropped; `mvn clean verify` → **106 tests, 0 failures** (access-service 84 + starter 22).
+New gotcha #33 (Spring `ThreadPoolTaskExecutor.shutdown()` drains the queue by default).
+D7 row + §5 API + §9/§11 + DESIGN + REVIEW in agreement. Track A + C done, D1 + D2 done,
+**remaining: Track D (D3 → D4 optional)**. Prior 2026-10-20: **D1 SHIPPED** — profileSet-keyed
+cache: `CacheKeys.grantsKey(Set)` → `rbac:grants:{sha256(sorted profiles)}`, `userId`
+excluded (audit-only); 94 tests green. Prior 2026-10-19:
 **TRACK C REMAINDER SHIPPED** — C2 fresh-replica L2 seed,
 C3 subscriber durability (monitor + non-fatal missing queues + `rbac.client.bus.*`
 meters), C5b stampede protection (Caffeine per-key locking); `mvn clean verify` →

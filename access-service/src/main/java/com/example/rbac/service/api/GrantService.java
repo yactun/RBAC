@@ -1,11 +1,8 @@
 package com.example.rbac.service.api;
 
-import com.example.rbac.model.AccessDeniedException;
 import com.example.rbac.model.UserContext;
 import com.example.rbac.model.dto.CheckResult;
 import com.example.rbac.model.dto.GrantSet;
-import com.example.rbac.model.dto.Scope;
-import com.example.rbac.model.dto.UiElements;
 import com.example.rbac.service.audit.AuditService;
 import com.example.rbac.service.cache.GrantCache;
 import com.example.rbac.service.cache.VersionService;
@@ -29,8 +26,11 @@ import java.util.Set;
  * </ol>
  * Fail-closed: an error during resolution <b>propagates</b> (it is never cached, so a
  * transient blip can't poison the cache) — {@code check()} catches it and denies per
- * request; a genuine fault surfaces as a 500. A user who simply has no grant for a
- * scope/resource is a 403 ({@link AccessDeniedException}), not a 500.
+ * request; a genuine fault surfaces as a 500.
+ *
+ * <p>Scope/UI are NOT served here: the client derives them locally from the cached
+ * {@code GrantSet} (ADR D9) — {@code check} is the only per-operation decision this
+ * service makes (the former {@code scope()}/{@code ui()} were dead code, REVIEW D2).
  *
  * <p>Metrics (SLO evidence): {@code rbac.pdp.decision} timer per operation and
  * {@code rbac.pdp.cache} hit/miss counters for the shared L2 tier.
@@ -75,7 +75,9 @@ public class GrantService {
             GrantSet g = resolveGrants(user);
             boolean allowed = g.has(key);
             audit.decision(user.userId(), user.profiles(), "check", key, allowed, g.version(), requestId, service);
-            return new CheckResult(allowed, grantedBy(user, key), g.version());
+            // REVIEW D2: grantedBy comes from the cached GrantSet (the resolver built it
+            // at compute time) — no per-check DB query.
+            return new CheckResult(allowed, g.grantedBy(key), g.version());
         } catch (RuntimeException e) {
             // Fail-closed (ADR §9.3): a fault on the decision path is a deny, never an error.
             log.warn("check failed closed for user={}: {}", user.userId(), e.toString());
@@ -83,46 +85,6 @@ public class GrantService {
             return CheckResult.deny(0L);
         } finally {
             recordDecision("check", start);
-        }
-    }
-
-    private List<String> grantedBy(UserContext user, String key) {
-        return loader.load(user.profiles()).stream()
-                .filter(g -> g.permissionKeys().contains(key))
-                .map(ProfileGrants::profileName)
-                .toList();
-    }
-
-    public Scope scope(UserContext user, String resourceType) {
-        long start = System.nanoTime();
-        try {
-            GrantSet g = resolveGrants(user);
-            Scope s = (g.scopes() == null) ? null : g.scopes().get(resourceType);
-            if (s == null) {
-                // A legitimate deny (no scope for this resource type) → 403, not a 500.
-                // Still refuses an unscoped query (ADR §9.3 fail-closed).
-                throw new AccessDeniedException("No data scope for resourceType=" + resourceType
-                        + " (user denied an unscoped query)");
-            }
-            return s;
-        } finally {
-            recordDecision("scope", start);
-        }
-    }
-
-    public UiElements ui(UserContext user, String app) {
-        long start = System.nanoTime();
-        try {
-            GrantSet g = resolveGrants(user);
-            UiElements ui = (g.ui() == null) ? null : g.ui().get(app);
-            if (ui == null) {
-                // No UI bundle for this app → nothing is visible. A legitimate deny, not
-                // an error: return an empty bundle so the front-end renders nothing.
-                return new UiElements(app, List.of());
-            }
-            return ui;
-        } finally {
-            recordDecision("ui", start);
         }
     }
 
@@ -177,7 +139,7 @@ public class GrantService {
     private GrantSet compute(UserContext user, long version) {
         List<ProfileGrants> grants = loader.load(user.profiles());
         RbacResolver.Resolved r = resolver.resolve(grants, null, Set.of());
-        return new GrantSet(r.permissions(), r.scopes(), r.ui(), version);
+        return new GrantSet(r.permissions(), r.scopes(), r.ui(), r.grantedBy(), version);
     }
 
     private void recordDecision(String operation, long startNanos) {

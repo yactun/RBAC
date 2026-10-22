@@ -38,6 +38,20 @@ class RbacResolverTest {
     }
 
     @Test
+    void grantedBy_mapsEachKeyToTheProfilesGrantingIt() {
+        // REVIEW D2: provenance is resolved once at compute time and carried in the
+        // GrantSet, so /v1/check no longer re-queries the DB per check.
+        ProfileGrants a = new ProfileGrants("support", Set.of("orders:read"), Map.of(), List.of());
+        ProfileGrants b = new ProfileGrants("manager", Set.of("orders:read", "orders:refund"), Map.of(), List.of());
+
+        RbacResolver.Resolved r = resolver.resolve(List.of(a, b), null, Set.of());
+
+        assertEquals(List.of("support", "manager"), r.grantedBy().get("orders:read"));
+        assertEquals(List.of("manager"), r.grantedBy().get("orders:refund"));
+        assertEquals(2, r.grantedBy().size());
+    }
+
+    @Test
     void inFiltersAreOrMergedPerDimension_unionOfValues() {
         ProfileGrants a = new ProfileGrants("support", Set.of(),
                 Map.of("orders", List.of(in("orgIds", 1, 2), in("regions", "EU"))), List.of());

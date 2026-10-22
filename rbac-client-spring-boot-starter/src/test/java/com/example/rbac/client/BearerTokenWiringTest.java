@@ -17,6 +17,7 @@ import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,7 +39,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class BearerTokenWiringTest {
 
-    private static final GrantSet GRANT_SET = new GrantSet(List.of("orders:create"), null, null, 7L);
+    private static final GrantSet GRANT_SET = new GrantSet(List.of("orders:create"), null, null, Map.of(), 7L);
 
     private HttpServer server;
     private final List<String> authHeaders = Collections.synchronizedList(new ArrayList<>());

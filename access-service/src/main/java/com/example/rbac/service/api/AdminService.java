@@ -24,6 +24,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.math.BigInteger;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -71,13 +72,43 @@ public class AdminService {
 
     @Transactional
     public Profile createProfile(String actor, String name, String description) {
+        if (name == null || name.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "profile name is required");
+        }
         if (profiles.existsByName(name)) {
-            throw new IllegalStateException("Profile already exists: " + name);
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Profile already exists: " + name);
         }
         Profile p = profiles.save(new Profile(name, description));
         audit.change(actor, "profile", name, "create", "{}");
         publishInvalidation();
         return p;
+    }
+
+    /**
+     * REVIEW D2: the permission catalog is EXPLICIT (ADR D7 — "defined once in a
+     * central catalog"). Keys are created here, on purpose; granting a key that is
+     * not in the catalog is a 404, never a silent auto-create (a typo like
+     * {@code orders:refnud} used to mint a new catalog entry).
+     *
+     * <p>No invalidation is published: a brand-new key is referenced by no profile,
+     * so no {@code GrantSet} can change.
+     */
+    @Transactional
+    public Permission createPermission(String actor, String key, String description) {
+        if (key == null || key.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "permission key is required");
+        }
+        if (permissions.findByKey(key).isPresent()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Permission already exists: " + key);
+        }
+        Permission perm = permissions.save(new Permission(key, description));
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("key", key);
+        if (description != null) {
+            detail.put("description", description);
+        }
+        audit.change(actor, "permission", key, "create", toJson(detail));
+        return perm;
     }
 
     @Transactional
@@ -95,7 +126,7 @@ public class AdminService {
         jdbc.update("update profile_permission set granted_at = now(), granted_by = ? "
                         + "where profile_id = ? and permission_id = ?",
                 actor, p.getId(), perm.getId());
-        audit.change(actor, "profile", profileName, "grant_permission", "{\"key\":\"" + permissionKey + "\"}");
+        audit.change(actor, "profile", profileName, "grant_permission", toJson(Map.of("key", permissionKey)));
         publishInvalidation();
     }
 
@@ -108,7 +139,7 @@ public class AdminService {
             p.touch();
             profiles.save(p);
         }
-        audit.change(actor, "profile", profileName, "revoke_permission", "{\"key\":\"" + permissionKey + "\"}");
+        audit.change(actor, "profile", profileName, "revoke_permission", toJson(Map.of("key", permissionKey)));
         publishInvalidation();
     }
 
@@ -159,7 +190,7 @@ public class AdminService {
                 })
                 .orElse(false);
         audit.change(actor, "profile", profileName, "delete_scope",
-                "{\"resourceType\":\"" + resourceTypeName + "\",\"existed\":" + removed + "}");
+                toJson(Map.of("resourceType", resourceTypeName, "existed", removed)));
         publishInvalidation();
     }
 
@@ -167,16 +198,17 @@ public class AdminService {
     public Template createTemplate(String actor, String appId, String name,
                                    Set<String> elementPermissions) {
         if (templates.existsByAppIdAndName(appId, name)) {
-            throw new IllegalStateException("Template already exists: " + appId + "/" + name);
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Template already exists: " + appId + "/" + name);
         }
         Template t = new Template(appId, name);
         for (String permKey : elementPermissions) {
+            // REVIEW D2: element permissions must already exist in the catalog (404 otherwise).
             Permission perm = requirePermission(permKey);
             t.getElements().add(new TemplateElement(t, elementKeyFromPermission(permKey), perm));
         }
         Template saved = templates.save(t);   // cascade = PERSIST writes the elements
         audit.change(actor, "template", appId + "/" + name, "create",
-                "{\"elements\":" + toJson(elementPermissions) + "}");
+                toJson(Map.of("elements", List.copyOf(elementPermissions))));
         publishInvalidation();
         return saved;
     }
@@ -185,7 +217,8 @@ public class AdminService {
     public void attachTemplate(String actor, String profileName, String appId, String templateName) {
         Profile p = requireProfile(profileName);
         Template t = templates.findByAppIdAndName(appId, templateName)
-                .orElseThrow(() -> new IllegalStateException("Template not found: " + appId + "/" + templateName));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Template not found: " + appId + "/" + templateName));
         p.getTemplates().add(t);
         p.touch();
         profiles.save(p);
@@ -195,7 +228,7 @@ public class AdminService {
                         + "where profile_id = ? and template_id = ?",
                 actor, p.getId(), t.getId());
         audit.change(actor, "profile", profileName, "attach_template",
-                "{\"app\":\"" + appId + "\",\"template\":\"" + templateName + "\"}");
+                toJson(Map.of("app", appId, "template", templateName)));
         publishInvalidation();
     }
 
@@ -210,14 +243,15 @@ public class AdminService {
     public void detachTemplate(String actor, String profileName, String appId, String templateName) {
         Profile p = requireProfile(profileName);
         Template t = templates.findByAppIdAndName(appId, templateName)
-                .orElseThrow(() -> new IllegalStateException("Template not found: " + appId + "/" + templateName));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Template not found: " + appId + "/" + templateName));
         boolean removed = p.getTemplates().remove(t);
         if (removed) {
             p.touch();
             profiles.save(p);
         }
         audit.change(actor, "profile", profileName, "detach_template",
-                "{\"app\":\"" + appId + "\",\"template\":\"" + templateName + "\"}");
+                toJson(Map.of("app", appId, "template", templateName)));
         publishInvalidation();
     }
 
@@ -229,11 +263,11 @@ public class AdminService {
                     "dimensionSchema is required: it defines the canonical dimension set for scopes.");
         }
         if (resourceTypes.existsByName(name)) {
-            throw new IllegalStateException("Resource type already exists: " + name);
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Resource type already exists: " + name);
         }
         ResourceType rt = resourceTypes.save(new ResourceType(name, ownerService, toJson(dimensionSchema)));
         audit.change(actor, "resource_type", name, "register",
-                "{\"ownerService\":\"" + ownerService + "\"}");
+                toJson(Map.of("ownerService", String.valueOf(ownerService))));
         publishInvalidation();
         return rt;
     }
@@ -254,17 +288,25 @@ public class AdminService {
 
     private Profile requireProfile(String name) {
         return profiles.findByName(name)
-                .orElseThrow(() -> new IllegalStateException("Profile not found: " + name));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Profile not found: " + name));
     }
 
+    /**
+     * REVIEW D2: the catalog is explicit — an unknown key is a 404 (create it first
+     * via {@code POST /v1/admin/permissions}), never a silent auto-create.
+     */
     private Permission requirePermission(String key) {
         return permissions.findByKey(key)
-                .orElseGet(() -> permissions.save(new Permission(key, null)));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Permission not found: " + key
+                                + " — create it first (POST /v1/admin/permissions)"));
     }
 
     private ResourceType requireResourceType(String name) {
         return resourceTypes.findByName(name)
-                .orElseThrow(() -> new IllegalStateException("Resource type not found: " + name));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Resource type not found: " + name));
     }
 
     /**
@@ -307,7 +349,49 @@ public class AdminService {
                         "op " + f.op() + " is not allowed for dimension '" + f.dimension()
                                 + "' of resource type '" + rt.getName() + "' (allowed: " + allowed + ")");
             }
+            // REVIEW D2: validate the VALUES against the schema's declared item type
+            // (e.g. {"type":"list","item":"string"}) — not just the dimension keys.
+            String item = declaredItemType(schema.get(f.dimension()));
+            if (item != null) {
+                for (Object v : f.values()) {
+                    if (!valueMatchesType(v, item)) {
+                        throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                                "value " + v + " (" + typeName(v) + ") does not match the declared "
+                                        + "type '" + item + "' for dimension '" + f.dimension()
+                                        + "' of resource type '" + rt.getName() + "'");
+                    }
+                }
+            }
         }
+    }
+
+    /**
+     * The declared value type of a dimension, if any: the schema entry's
+     * {@code item} field (e.g. {@code {"type":"list","item":"string"}}). Legacy
+     * entries without {@code item} declare no type → no value-type check (unchanged
+     * behavior).
+     */
+    private static String declaredItemType(Object dimensionSchema) {
+        if (dimensionSchema instanceof Map<?, ?> m && m.get("item") instanceof String s && !s.isBlank()) {
+            return s;
+        }
+        return null;
+    }
+
+    /** True when a JSON-decoded value matches the declared item type (fail-open on an unknown type name). */
+    private static boolean valueMatchesType(Object value, String type) {
+        return switch (type.toLowerCase()) {
+            case "string", "text", "uuid" -> value instanceof String;
+            case "int", "integer", "long", "bigint" ->
+                    value instanceof Integer || value instanceof Long || value instanceof BigInteger;
+            case "number", "double", "float", "decimal" -> value instanceof Number;
+            case "boolean", "bool" -> value instanceof Boolean;
+            default -> true;
+        };
+    }
+
+    private static String typeName(Object value) {
+        return value == null ? "null" : value.getClass().getSimpleName();
     }
 
     /**

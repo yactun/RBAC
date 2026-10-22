@@ -67,7 +67,9 @@ public class DefaultAccessClient implements AccessClient, InvalidationHandler {
             Resolved r = resolve(user);
             source = r.source();
             boolean allowed = r.set().has(key);
-            return new CheckResult(allowed, List.of(), r.set().version());
+            // grantedBy is part of the cached GrantSet (REVIEW D2) — provenance is
+            // derived locally, like everything else (ADR D9).
+            return new CheckResult(allowed, r.set().grantedBy(key), r.set().version());
         } catch (RuntimeException e) {
             log.warn("check failed closed for user={}: {}", user.userId(), e.toString());
             return CheckResult.deny(localVersion.get());

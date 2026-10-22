@@ -60,6 +60,7 @@ class AdminServiceTest {
     private ProfileScopeRepository scopes;
     private TemplateRepository templates;
     private JdbcTemplate jdbc;
+    private AuditService audit;
     private AdminService service;
     private final ObjectMapper json = new ObjectMapper();
 
@@ -74,6 +75,7 @@ class AdminServiceTest {
         scopes = mock(ProfileScopeRepository.class);
         templates = mock(TemplateRepository.class);
         jdbc = mock(JdbcTemplate.class);
+        audit = mock(AuditService.class);   // mocked so the change-audit JSON can be captured
         service = new AdminService(profiles,
                 permissions,
                 resourceTypes, scopes,
@@ -86,13 +88,7 @@ class AdminServiceTest {
                         return 42L;
                     }
                 },
-                new AuditService(null) {
-                    @Override
-                    public void change(String actor, String entity, String entityRef,
-                                      String action, String detailJson) {
-                        // no-op fake: audit persistence is out of scope here
-                    }
-                },
+                audit,
                 json,
                 jdbc);
     }
@@ -305,10 +301,126 @@ class AdminServiceTest {
         when(templates.findByAppIdAndName("customers-web", "ghost"))
                 .thenReturn(Optional.empty());
 
-        IllegalStateException ex = assertThrows(IllegalStateException.class,
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
                 () -> service.detachTemplate("alice", "support", "customers-web", "ghost"));
 
-        assertEquals("Template not found: customers-web/ghost", ex.getMessage());
+        assertEquals(HttpStatus.NOT_FOUND, ex.getStatusCode());
         verify(profiles, never()).save(any(Profile.class));
+    }
+
+    // --- D2 (REVIEW): explicit permission catalog, 404/409 semantics, value-type
+    // validation, and JSON-escaped change-audit ---
+
+    @Test
+    void createPermission_addsACatalogEntry_andAuditsIt() throws Exception {
+        when(permissions.findByKey("orders:refund")).thenReturn(Optional.empty());
+        when(permissions.save(any(Permission.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        Permission saved = service.createPermission("alice", "orders:refund", "Refund an order");
+
+        assertEquals("orders:refund", saved.getKey());
+        verify(permissions).save(any(Permission.class));
+        ArgumentCaptor<String> detail = ArgumentCaptor.forClass(String.class);
+        verify(audit).change(eq("alice"), eq("permission"), eq("orders:refund"), eq("create"), detail.capture());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> parsed = json.readValue(detail.getValue(), Map.class);
+        assertEquals("orders:refund", parsed.get("key"));
+        assertEquals("Refund an order", parsed.get("description"));
+    }
+
+    @Test
+    void createPermission_conflictsWhenTheKeyAlreadyExists() {
+        when(permissions.findByKey("orders:refund"))
+                .thenReturn(Optional.of(new Permission("orders:refund", null)));
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> service.createPermission("alice", "orders:refund", null));
+
+        assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+        verify(permissions, never()).save(any(Permission.class));
+    }
+
+    @Test
+    void grantPermission_rejectsAKeyNotInTheCatalog_noAutoCreate() {
+        when(profiles.findByName("support")).thenReturn(Optional.of(p));
+        when(permissions.findByKey("orders:refnud")).thenReturn(Optional.empty());
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> service.grantPermission("alice", "support", "orders:refnud"));
+
+        assertEquals(HttpStatus.NOT_FOUND, ex.getStatusCode());
+        verify(permissions, never()).save(any(Permission.class));   // the old silent auto-create, pinned off
+    }
+
+    @Test
+    void grantPermission_unknownProfileIsA404() {
+        when(profiles.findByName("ghost")).thenReturn(Optional.empty());
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> service.grantPermission("alice", "ghost", "orders:create"));
+
+        assertEquals(HttpStatus.NOT_FOUND, ex.getStatusCode());
+    }
+
+    @Test
+    void createProfile_conflictsWhenItAlreadyExists() {
+        when(profiles.existsByName("support")).thenReturn(true);
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> service.createProfile("alice", "support", null));
+
+        assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+        verify(profiles, never()).save(any(Profile.class));
+    }
+
+    @Test
+    void registerResourceType_conflictsWhenItAlreadyExists() {
+        when(resourceTypes.existsByName("orders")).thenReturn(true);
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> service.registerResourceType("alice", "orders", "orders-svc",
+                        Map.of("orgIds", Map.of("type", "list"))));
+
+        assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+        verify(resourceTypes, never()).save(any(ResourceType.class));
+    }
+
+    @Test
+    void setScope_rejectsValuesOfTheWrongDeclaredType() {
+        givenOrdersType("{\"orgIds\":{\"item\":\"string\"}}");
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> service.setScope("alice", "support", "orders", List.of(in("orgIds", 1, 2))));
+
+        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+        verify(scopes, never()).save(any(ProfileScope.class));
+    }
+
+    @Test
+    void setScope_acceptsValuesMatchingTheDeclaredType() {
+        givenOrdersType("{\"orgIds\":{\"item\":\"int\"}}");
+        when(scopes.findByProfileIdAndResourceType_Id(any(), any())).thenReturn(Optional.empty());
+
+        service.setScope("alice", "support", "orders", List.of(in("orgIds", 1, 2)));
+
+        verify(scopes).save(any(ProfileScope.class));
+    }
+
+    @Test
+    void changeAuditDetail_isEscapedThroughObjectMapper() throws Exception {
+        // A permission key containing a quote must produce VALID jsonb — the old
+        // string concatenation built `{"key":"orders:create"evil"}` and broke the cast.
+        String tricky = "orders:create\"injected";
+        when(profiles.findByName("support")).thenReturn(Optional.of(p));
+        Permission perm = new Permission(tricky, null);
+        when(permissions.findByKey(tricky)).thenReturn(Optional.of(perm));
+
+        service.grantPermission("alice", "support", tricky);
+
+        ArgumentCaptor<String> detail = ArgumentCaptor.forClass(String.class);
+        verify(audit).change(eq("alice"), eq("profile"), eq("support"), eq("grant_permission"), detail.capture());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> parsed = json.readValue(detail.getValue(), Map.class);
+        assertEquals(tricky, parsed.get("key"));
     }
 }

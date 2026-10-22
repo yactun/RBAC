@@ -46,7 +46,7 @@ class L1CacheCoalescingTest {
         AtomicInteger fetches = new AtomicInteger();
         byte[] body;
         try {
-            body = json.writeValueAsBytes(new GrantSet(List.of("orders:create"), null, null, 3L));
+            body = json.writeValueAsBytes(new GrantSet(List.of("orders:create"), null, null, Map.of(), 3L));
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }

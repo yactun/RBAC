@@ -108,7 +108,7 @@ class InvalidationSubscriberIntegrationTest {
     @Test
     void invalidationEventOnBus_clearsClientL1() throws Exception {
         // Warm L1 the way DefaultAccessClient does after a PDP fetch
-        GrantSet grantSet = new GrantSet(List.of("orders:create"), Map.of(), Map.of(), 1L);
+        GrantSet grantSet = new GrantSet(List.of("orders:create"), Map.of(), Map.of(), Map.of(), 1L);
         l1.put(Set.of("ops"), grantSet);
         assertThat(l1.get(Set.of("ops"))).isSameAs(grantSet);
 
@@ -135,7 +135,7 @@ class InvalidationSubscriberIntegrationTest {
 
     @Test
     void l2ReadUsesTheSharedCacheKeyScheme() throws Exception {
-        GrantSet grantSet = new GrantSet(List.of("orders:create"), Map.of(), Map.of(), 7L);
+        GrantSet grantSet = new GrantSet(List.of("orders:create"), Map.of(), Map.of(), Map.of(), 7L);
         // Write as the PDP does (shared key scheme + JSON body)
         redisTemplate.opsForValue().set(CacheKeys.grantsKey(Set.of("ops")),
                 json.writeValueAsString(grantSet));

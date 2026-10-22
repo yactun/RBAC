@@ -45,6 +45,19 @@ public class AdminController {
         return Map.of("name", profile.getName());
     }
 
+    /**
+     * REVIEW D2: the explicit permission catalog (ADR D7 — defined once). Grants
+     * reference keys created here; unknown keys are a 404 (no more silent
+     * auto-create on a typo). 409 when the key already exists.
+     */
+    @PostMapping("/permissions")
+    @ResponseStatus(HttpStatus.CREATED)
+    public Map<String, Object> createPermission(HttpServletRequest request,
+                                                @RequestBody PermissionBody body) {
+        var perm = admin.createPermission(actor(request), body.key(), body.description());
+        return Map.of("key", perm.getKey());
+    }
+
     @PostMapping("/profiles/{name}/permissions")
     public Map<String, String> grantPermission(HttpServletRequest request,
                                                @PathVariable String name, @RequestBody KeyBody body) {
@@ -126,6 +139,7 @@ public class AdminController {
 
     // --- request bodies ---
     public record ProfileBody(String name, String description) {}
+    public record PermissionBody(String key, String description) {}
     public record KeyBody(String key) {}
     public record TemplateBody(String appId, String name, Set<String> elements) {}
     public record TemplateRef(String appId, String name) {}

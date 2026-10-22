@@ -49,7 +49,7 @@ class DefaultAccessClientMetricsTest {
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final RbacClientMetrics metrics = new MicrometerRbacClientMetrics(registry);
 
-    private static final GrantSet GRANT_SET = new GrantSet(List.of("orders:create"), null, null, 5L);
+    private static final GrantSet GRANT_SET = new GrantSet(List.of("orders:create"), null, null, Map.of(), 5L);
 
     private L1Cache freshL1() {
         return new L1Cache(Duration.ofMinutes(5), 100L);
