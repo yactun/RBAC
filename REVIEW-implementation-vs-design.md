@@ -109,7 +109,14 @@ OTLP via Micrometer is the right choice. Next steps: **tracing (OTel) spans acro
 
 ## 3. Test gaps that would have caught the above
 
-No test exists for: **Redis down** (#5), **broker restart** (#7), a **fresh replica reading stale L2** (#6), **revoking a permission a template also grants** (#4), a **scope with empty/misspelled dimensions** (#3), or an **unauthenticated admin call** (#1). Each maps to a §8 property in ADR-002 or a Track C/D item below.
+**Status (D3 audit, 2026-10-22): all six gaps below are now pinned** — each was closed while shipping Track C/D. Verified against source; see the pinning test for each:
+
+- **Redis down** (#5) — PDP: `GrantServiceRedisDownTest` (2 — `grants`/`check` still served from Postgres, no 500); client: `DefaultAccessClientMetricsTest.l2Failure_bypassesTier_fallsThroughToPdp_andRecordsError` (L2 throws → served from the PDP, `result=error` recorded).
+- **broker restart** (#7) — `InvalidationSubscriberReconnectTest.survivesQueueLoss_redeclaresAndDeliversInvalidation` (real RabbitMQ; the queue is deleted out from under a live consumer — the exact end state of a broker restart — then re-declared and an event delivered).
+- **fresh replica reading stale L2** (#6) — `DefaultAccessClientVersionSyncTest` (4, incl. a control test pinning the old hole: without sync a stale L2 entry *is* served; with sync it is rejected).
+- **revoking a permission a template also grants** (#4) — `AccessServiceIntegrationTest.decisionFlow` (attach → element listed but hidden; grant the gating perm → visible; **revoke → hidden again** — the T1 regression the #4 bug was).
+- **scope with empty/misspelled dimensions** (#3) — `ScopeTest` (`inEmptyListIsDeny_notAWildcard`, `unknownDimensionThrows_neverReturnsAnEmptyList`) + authoring-side rejection in `AdminServiceTest`.
+- **unauthenticated admin call** (#1) — `AccessServiceAuthMeshTest` (4 — no FPC → 401 everywhere; non-admin → 403 on admin) + `AccessServiceAuthJwtTest` (3 — no token → 401; token w/o `rbac-admin` scope → 403 on admin).
 
 ---
 
@@ -140,7 +147,7 @@ Two rules shape the order (both from the repo's own discipline): (1) **ADR-gated
 ### Track D — Correctness cleanups + the big cache win
 - **D1** **key the cache on the profile set** (not `(userId, profileSet)`) — highest-leverage change (15k → dozens of entries; per-profile invalidation becomes trivial). **Done 2026-10-20.**
 - **D2** scope-merge dedup; validate scope value **types**; explicit permission catalog (stop `requirePermission` auto-creating); `grantedBy` without a per-check DB hit; 404/409 instead of `IllegalStateException`; bounded `@Async` executor; drop unused `GrantService.scope()/ui()`; JSON-escape the change-audit fields. **Done 2026-10-22** (see §6).
-- **D3** add the §3 test gaps.
+- **D3** add the §3 test gaps. **Done 2026-10-22** — audited each §3 gap against source; **all six are already pinned** by Track C/D tests (see §3 status), so no new tests were needed.
 - **D4 (optional)** `pg_partman` + `pg_cron`; OTel tracing spans; `localVersion`-lag gauge.
 
 ---
@@ -184,5 +191,6 @@ Two rules shape the order (both from the repo's own discipline): (1) **ADR-gated
   - **Bounded `@Async`:** new `AuditAsyncConfig` defines the `applicationTaskExecutor` bean (2/8 pool, 1000 queue, `CallerRunsPolicy`, `waitForTasksToCompleteOnShutdown=true`). Gotcha #33 (Spring's `shutdown()` drains the queue by default).
   - **Dead code dropped:** `GrantService.scope()`/`ui()` removed (no controller caller; the client derives locally, ADR D9). Scope **dedup** was already implemented (`RbacResolverTest` pins `EU, US` union).
   - Tests: `AdminServiceTest` 16→25 (+9), `RbacResolverTest` 13→14 (`grantedBy` map), new `AuditAsyncConfigTest` (2). `mvn clean verify` GREEN — **106 tests** (access-service 84 + starter 22).
+- **Track D — D3 (§3 test-gap audit, done 2026-10-22):** each of the six §3 gaps was verified against the source — **all are already pinned** by Track C/D tests (Redis-down #5, broker-restart #7, stale-L2 #6, template-revoke #4, empty/misspelled-scope #3, unauthenticated-admin #1 — see the §3 status for the pinning test of each). **No new tests were needed**; D3 closes by confirming coverage, per the "add only the truly missing tests" rule.
 
-**Not yet started:** Track D remainder (**D3** the §3 test gaps — audit which are already pinned; **D4** optional). Each is a self-contained, testable increment. (Track A done 2026-10-17; Track C done 2026-10-19; D1 done 2026-10-20; D2 done 2026-10-22.)
+**Not yet started:** **D4 (optional)** — `pg_partman` + `pg_cron`, OTel tracing spans, `localVersion`-lag gauge. Only if the platform wants it. (Track A done 2026-10-17; Track C done 2026-10-19; D1 done 2026-10-20; D2 done 2026-10-22; D3 done 2026-10-22.)

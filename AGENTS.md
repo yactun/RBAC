@@ -6,7 +6,7 @@
 
 ---
 
-## 0. STATUS — where things stand (2026-10-22, **GREEN — ADR-002 Accepted; Track A + C shipped; D1 + D2 done; 106 tests**)
+## 0. STATUS — where things stand (2026-10-22, **GREEN — ADR-002 Accepted; Track A + C shipped; D1 + D2 + D3 done; 106 tests**)
 
 **This session (2026-10-22) — D2 (REVIEW: correctness cleanups); `mvn clean verify` → 106 tests, 0 failures (access-service 84 + starter 22):**
 - **D2 (all the REVIEW §2 "small bugs" + catalog hardening):**
@@ -44,10 +44,17 @@
   `RbacResolverTest` 13→**14** (`grantedBy` map); new `AuditAsyncConfigTest` (**2**, incl. a
   deterministic overflow→caller demonstration); IT `decisionFlow`/`metrics` now `ensurePermission`
   (201 **or** 409) before granting; `GrantSet` 5-arg constructor in all 8 test sites.
-- **Next (per `REVIEW-implementation-vs-design.md` §4):** D1 + D2 **done** → remaining **Track D**:
-  **D3** the §3 test gaps (Redis-down / broker-restart / stale-L2 / template-revoke / empty-scope /
-  unauthenticated-admin are mostly pinned already — the residual gap list), **D4** optional
-  (pg_partman+pg_cron, OTel tracing spans, `localVersion`-lag gauge).
+- **D3 (the §3 test gaps) — audited 2026-10-22: all six already pinned.** Each §3 gap was
+  verified against source; the pinning test is named in `REVIEW-implementation-vs-design.md` §3
+  (Redis-down #5 → `GrantServiceRedisDownTest` + `DefaultAccessClientMetricsTest.l2Failure_…`;
+  broker-restart #7 → `InvalidationSubscriberReconnectTest`; stale-L2 #6 →
+  `DefaultAccessClientVersionSyncTest`; template-revoke #4 → the `decisionFlow` IT;
+  empty/misspelled-scope #3 → `ScopeTest` + `AdminServiceTest`; unauthenticated-admin #1 →
+  `AccessServiceAuthMeshTest` + `AccessServiceAuthJwtTest`). **No new tests needed** — the work
+  was already done in Track C/D.
+- **Next (per `REVIEW-implementation-vs-design.md` §4):** D1 + D2 + D3 **done** → only **D4**
+  remains, and it is **optional / platform-gated** (pg_partman+pg_cron, OTel tracing spans,
+  `localVersion`-lag gauge) — do not build unless the platform asks.
 
 **Previously (2026-10-20) — D1 (REVIEW: profileSet-keyed cache); `mvn clean verify` → 94 tests, 0 failures (access-service 72 + starter 22):**
 - **D1 (key the cache on the profile set, not the user):** the `GrantSet` is a pure function
@@ -873,6 +880,11 @@ mvn clean verify          # compiles all 4 modules, runs tests, packages (WORKS,
   `waitForTasksToCompleteOnShutdown=true`); dead `GrantService.scope()/ui()` dropped.
   Tests: `AdminServiceTest` 16→25, `RbacResolverTest` 13→14, new `AuditAsyncConfigTest`
   (2); **106 tests green** (access-service 84 + starter 22). Gotcha #33.
+- **D3 (REVIEW §3 test-gap audit) — DONE (2026-10-22):** audited all six §3 gaps against
+  source — **all already pinned** by Track C/D tests (Redis-down #5, broker-restart #7,
+  stale-L2 #6, template-revoke #4, empty/misspelled-scope #3, unauthenticated-admin #1).
+  Pinning test named for each in `REVIEW-implementation-vs-design.md` §3. **No new tests
+  added** — the coverage already existed; D3 closes by confirming it.
 
 **Intentionally NOT done (team review completed 2026-10-14 — see §10):**
 - No admin *surface* beyond the JSON API (A5: API/config first — no UI in v1).
@@ -940,10 +952,12 @@ implementation items in §11.
    without a per-check DB hit, 404/409 semantics, bounded `@Async`, JSON-escape the
    change-audit fields, dead `GrantService.scope()/ui()` dropped; **106 tests green**.
    See the §0 D2 entry + §9 bullet; gotcha #33.
-10. **NEXT — D3** (the `REVIEW-implementation-vs-design.md` §3 test gaps — audit which are
-   already pinned; add only the truly missing tests); **D4** optional (pg_partman+pg_cron,
-   OTel tracing spans, `localVersion`-lag gauge).
-11. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
+10. **DONE (2026-10-22) — D3** (the `REVIEW-implementation-vs-design.md` §3 test gaps):
+   audited all six against source — **all already pinned** by Track C/D tests; pinning test
+   named per gap in REVIEW §3; **no new tests needed**. See §0 D3 entry + §9 bullet.
+11. **D4 (optional / platform-gated):** pg_partman+pg_cron, OTel tracing spans,
+   `localVersion`-lag gauge — only if the platform asks.
+12. Only then — and **only if the team wants it**: the D3 SpEL escape hatch
    (conditional grants). Gated on a team decision; do not build unilaterally.
 
 ---
@@ -956,8 +970,10 @@ validation at authoring, JSON-escaped `audit.change` details, bounded `@Async`
 (`AuditAsyncConfig`: 2/8 pool, 1000 queue, `CallerRunsPolicy`), dead `GrantService.scope()/ui()`
 dropped; `mvn clean verify` → **106 tests, 0 failures** (access-service 84 + starter 22).
 New gotcha #33 (Spring `ThreadPoolTaskExecutor.shutdown()` drains the queue by default).
-D7 row + §5 API + §9/§11 + DESIGN + REVIEW in agreement. Track A + C done, D1 + D2 done,
-**remaining: Track D (D3 → D4 optional)**. Prior 2026-10-20: **D1 SHIPPED** — profileSet-keyed
+D7 row + §5 API + §9/§11 + DESIGN + REVIEW in agreement. **D3 (the REVIEW §3 test gaps)
+audited 2026-10-22: all six already pinned by Track C/D tests — no new tests needed** (pinning
+test named per gap in REVIEW §3). Track A + C done, D1 + D2 + D3 done, **remaining: D4
+(optional / platform-gated)**. Prior 2026-10-20: **D1 SHIPPED** — profileSet-keyed
 cache: `CacheKeys.grantsKey(Set)` → `rbac:grants:{sha256(sorted profiles)}`, `userId`
 excluded (audit-only); 94 tests green. Prior 2026-10-19:
 **TRACK C REMAINDER SHIPPED** — C2 fresh-replica L2 seed,
